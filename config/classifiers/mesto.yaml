@@ -1,0 +1,28 @@
+status: ZAGLUSHKA
+zamenit_na: заменить полным справочником региона
+istochnik: 'ОКАТО. ЗАГЛУШКА: заменить полным справочником региона'
+items:
+- kod: EKB
+  nazvanie: Екатеринбург
+- kod: NTAGIL
+  nazvanie: Нижний Тагил
+- kod: KAMENSK
+  nazvanie: Каменск-Уральский
+- kod: PERVOURALSK
+  nazvanie: Первоуральск
+- kod: SEROV
+  nazvanie: Серов
+- kod: NOVOURALSK
+  nazvanie: Новоуральск
+- kod: VPYSHMA
+  nazvanie: Верхняя Пышма
+- kod: ASBEST
+  nazvanie: Асбест
+- kod: REVDA
+  nazvanie: Ревда
+- kod: POLEVSKOY
+  nazvanie: Полевской
+- kod: BEREZOVSKY
+  nazvanie: Берёзовский
+- kod: INOE
+  nazvanie: Иной пункт

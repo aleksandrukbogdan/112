@@ -1,0 +1,249 @@
+# Унифицированная карточка информационного обмена.
+# Источник: ПП РФ от 12.11.2021 № 1931, приложение (структура УКИО)
+# Обязательность полей общей части уточнена приказом МОБ СО № 65, прил. № 11
+#
+# Формат поля:
+#   key       — имя в БД и API
+#   label     — подпись в интерфейсе
+#   type      — text | int | bool | date | time | float | select | textarea
+#   req       — обязательное для отправки карточки в ДДС
+#   auto      — заполняется автоматически (от оператора связи / системы)
+#   classifier— имя файла из config/classifiers/
+#   hint      — подсказка оператору (из приложения № 11)
+
+istochnik: "ПП РФ 1931, приложение; приказ МОБ СО 65 прил.11"
+
+# ============================================================ УЧОЛ
+# Унифицированная часть опросного листа — сведения о ЗАЯВИТЕЛЕ.
+# Отдельная сущность: одно обращение → одна карточка,
+# одна карточка ← много обращений (руководство АРМ «Искра»).
+
+uchol:
+  kanal:
+    - {key: kind, label: "Тип обращения", type: select, req: true,
+       options: [{v: call, l: "Телефонный вызов"}, {v: sms, l: "SMS"},
+                 {v: era_glonass, l: "ЭРА-ГЛОНАСС"}, {v: manual, l: "Ручное"}]}
+
+  abonent:
+    - {key: ab_telefon,  label: "Телефон абонента",  type: text,  auto: true}
+    - {key: ab_familiya, label: "Фамилия владельца", type: text,  auto: true}
+    - {key: ab_imya,     label: "Имя владельца",     type: text,  auto: true}
+    - {key: ab_otchestvo,label: "Отчество",          type: text,  auto: true}
+    - {key: ab_adres,    label: "Адрес установки",   type: text,  auto: true}
+    - {key: shirota,     label: "Широта",            type: float, auto: true}
+    - {key: dolgota,     label: "Долгота",           type: float, auto: true}
+    - {key: tochnost_m,  label: "Точность, м",       type: float, auto: true}
+
+  zayavitel:
+    - {key: familiya,    label: "Фамилия",        type: text, req: true}
+    - {key: imya,        label: "Имя",            type: text, req: true}
+    - {key: otchestvo,   label: "Отчество",       type: text}
+    - {key: telefon,     label: "Телефон",        type: text, req: true}
+    - {key: data_rozhdeniya, label: "Дата рождения", type: date}
+    - {key: yazyk,       label: "Язык общения",   type: select, classifier: yazyk,
+       default: "ru", hint: "Не русский — переключить на переводчика ЦОВ"}
+    - {key: adres,       label: "Адрес проживания", type: text}
+    - {key: kvartira,    label: "Квартира",       type: text}
+
+  opros:
+    - {key: povod, label: "Повод обращения", type: textarea, req: true,
+       hint: "Опрос заявителя начинается с заполнения этого поля"}
+    - {key: utochnenie, label: "Уточнение", type: textarea}
+
+# ============================================================ УКИО, общая часть
+
+obshchaya:
+  sluzhebnoe:
+    - {key: identifikator, label: "Идентификатор", type: text, auto: true}
+    - {key: data_proish,   label: "Дата",  type: date, auto: true}
+    - {key: vremya_proish, label: "Время", type: time, auto: true}
+    - {key: sostoyanie,    label: "Состояние реагирования", type: select,
+       classifier: sostoyanie_reagirovaniya, default: "nachalo", auto: true}
+
+  # Порядок полей ЗДЕСЬ соответствует порядку опроса из приложения № 11:
+  # район, город, улица, дом, корпус, подъезд, этаж, этажность, домофон, подъезд
+  mesto:
+    - {key: rajon,        label: "Район",    type: text, req: true, order: 1}
+    - {key: mesto_okato,  label: "Населённый пункт", type: select,
+       classifier: mesto, req: true, order: 2}
+    - {key: ulica,        label: "Улица",    type: select, classifier: ulica,
+       req: true, order: 3}
+    - {key: dom,          label: "Дом",      type: text, req: true, order: 4}
+    - {key: dom_drob,     label: "Дробь",    type: text}
+    - {key: korpus,       label: "Корпус",   type: text, order: 5}
+    - {key: stroenie,     label: "Строение", type: text}
+    - {key: vladenie,     label: "Владение", type: text}
+    - {key: podezd,       label: "Подъезд",  type: text, order: 6}
+    - {key: etazh,        label: "Этаж",     type: text, order: 7,
+       hint: "Подвальные этажи — со знаком минус"}
+    - {key: etazhnost,    label: "Этажность дома", type: int, order: 8}
+    - {key: kod_domofona, label: "Код домофона", type: text, order: 9}
+    - {key: kvartira,     label: "Квартира", type: text}
+    - {key: podezd_put,   label: "Как подъехать", type: textarea, order: 10,
+       hint: "Приложение № 11: обязательный вопрос"}
+    - {key: perekrestok,  label: "Перекрёсток (вторая улица)", type: text,
+       hint: "Заполняется, если происшествие на перекрёстке"}
+    - {key: doroga,       label: "Дорога",   type: select, classifier: doroga}
+    - {key: kilometr,     label: "Километр", type: text}
+    - {key: metr,         label: "Метр",     type: text}
+    - {key: napravlenie,  label: "Направление", type: text}
+    - {key: blizhayshiy_np, label: "Ближайший нас. пункт", type: text}
+    - {key: adresny_uchastok, label: "Адресный участок", type: text}
+    - {key: ryadom,       label: "Рядом",    type: bool}
+    - {key: orientiry,    label: "Ориентиры", type: textarea,
+       hint: "Если заявитель не может назвать точный адрес"}
+    - {key: obekt_okpo,   label: "Объект",   type: select, classifier: obekt}
+    - {key: uroven,       label: "Подвал / чердак", type: select,
+       options: [{v: "", l: "—"}, {v: podval, l: "Подвал"}, {v: cherdak, l: "Чердак"}]}
+    - {key: gazifikaciya, label: "Дом газифицирован", type: bool,
+       hint: "Приложение № 11: спрашивать для частных домов"}
+    - {key: mesto_utochnenie, label: "Уточнение места", type: textarea}
+    - {key: shirota,      label: "Широта",   type: float}
+    - {key: dolgota,      label: "Долгота",  type: float}
+
+  proisshestvie:
+    - {key: tip_proisshestviya, label: "Тип происшествия", type: select,
+       classifier: tip_proisshestviya, req: true}
+    - {key: opisanie, label: "Описание происшествия", type: textarea, req: true}
+    - {key: chislo_postradavshih, label: "Пострадавших", type: int}
+    - {key: chislo_pogibshih,     label: "Погибших",     type: int}
+    - {key: kolichestvo_lyudey,   label: "Людей на объекте", type: int,
+       hint: "Для объектов с массовым пребыванием"}
+    - {key: mery_evakuacii, label: "Меры по эвакуации", type: textarea}
+    - {key: ugroza_lyudyam, label: "Угроза людям", type: bool}
+    - {key: ugroza_chs, label: "Угроза ЧС (признак «У»)", type: bool,
+       hint: "Соц. значимые происшествия — для доведения в ЦУКС и СКЦ"}
+    - {key: priznak_chs, label: "Признак ЧС", type: bool}
+    - {key: uroven_chs,  label: "Уровень ЧС", type: select, classifier: uroven_chs,
+       hint: "Вычисляется автоматически по числу пострадавших и погибших"}
+    - {key: blokirovanie, label: "Блокирование", type: bool}
+    - {key: dop_informaciya, label: "Доп. информация", type: textarea}
+
+  ischod:
+    - {key: nevyezdnoy, label: "Без реагирования", type: select,
+       classifier: nevyezdnye, hint: "Форма 2/112, строки 18.1–18.3"}
+    - {key: osnovanie_otkaza, label: "Основание отказа", type: select,
+       classifier: osnovaniya_otkaza, hint: "Приказ МОБ СО 65, п.49"}
+
+# ============================================================ специальные части
+
+special:
+  pozharnaya:
+    nazvanie: "Пожарная охрана"
+    polya:
+      - {key: harakter, label: "Характер происшествия", type: select,
+         classifier: vid_pozhara, req: true}
+      - {key: chto_gorit, label: "Что горит", type: text, req: true}
+      - {key: tip_zdaniya, label: "Тип здания", type: text}
+      - {key: etazhnost, label: "Этажность", type: int}
+      - {key: gazificirovan, label: "Газифицирован", type: bool}
+      - {key: vremya_razvitiya, label: "Оценка времени развития", type: text}
+      - {key: posledstviya, label: "Наблюдаемые последствия", type: textarea}
+      - {key: podezdnye_puti, label: "Подъездные пути", type: textarea}
+      - {key: usloviya_raboty, label: "Условия работы", type: textarea,
+         hint: "Решётки, шлагбаумы, узкие проезды"}
+      - {key: spasatelnye_raboty, label: "Нужны спасательные работы", type: bool}
+      - {key: vozmozhnost_evakuacii, label: "Возможность эвакуации", type: textarea}
+      - {key: sobstvenniki, label: "Собственники и арендаторы", type: textarea}
+
+  policiya:
+    nazvanie: "Полиция"
+    polya:
+      - {key: vid_pravonarusheniya, label: "Вид правонарушения", type: select,
+         classifier: vid_pravonarusheniya, req: true}
+      - {key: chislo_pravonarushiteley, label: "Число правонарушителей", type: int}
+      - {key: kolichestvo_ts, label: "Количество ТС", type: int}
+    spiski:
+      podozrevaemye:
+        nazvanie: "Подозреваемые"
+        polya:
+          - {key: pol, label: "Пол", type: select,
+             options: [{v: m, l: "Мужской"}, {v: zh, l: "Женский"}]}
+          - {key: vozrast, label: "Возраст на вид", type: text}
+          - {key: rost, label: "Рост", type: select, classifier: rost}
+          - {key: teloslozhenie, label: "Телосложение", type: select, classifier: teloslozhenie}
+          - {key: odezhda, label: "Одежда", type: textarea}
+          - {key: primety, label: "Особые приметы", type: textarea}
+      ts:
+        nazvanie: "Транспортные средства"
+        polya:
+          - {key: tip, label: "Тип ТС", type: select, classifier: tip_ts}
+          - {key: cvet, label: "Цвет", type: select, classifier: cvet_ts}
+          - {key: gosnomer, label: "Госномер", type: text}
+          - {key: region, label: "Регион", type: text}
+          - {key: skrylos, label: "Скрылось", type: bool}
+
+  smp:
+    nazvanie: "Скорая медицинская помощь"
+    polya:
+      - {key: chto_proizoshlo, label: "Что произошло", type: textarea, req: true}
+      - {key: kto_vyzval, label: "Кто вызвал", type: select, classifier: stepen_rodstva}
+      - {key: forma, label: "Форма помощи", type: select, classifier: forma_smp,
+         req: true, hint: "Приказ Минздрава 388н, п.11 и п.13"}
+      - {key: konsultaciya, label: "Признак консультации", type: bool}
+    spiski:
+      bolnye:
+        nazvanie: "Больные и пострадавшие"
+        polya:
+          - {key: familiya, label: "Фамилия", type: text}
+          - {key: imya, label: "Имя", type: text}
+          - {key: otchestvo, label: "Отчество", type: text}
+          - {key: data_rozhdeniya, label: "Дата рождения", type: date}
+          - {key: vozrast, label: "Возраст", type: int}
+          - {key: pol, label: "Пол", type: select,
+             options: [{v: m, l: "Мужской"}, {v: zh, l: "Женский"}]}
+          - {key: povod, label: "Повод к вызову", type: select,
+             classifier: povod_smp, req: true}
+          - {key: peredvizhenie, label: "Может передвигаться", type: bool}
+
+  gaz:
+    nazvanie: "Аварийная служба газовой сети"
+    polya:
+      - {key: vid_proisshestviya, label: "Вид происшествия", type: select,
+         classifier: vid_gaz, req: true}
+      - {key: instrukcii, label: "Инструкции", type: textarea, auto: true,
+         hint: "Подставляются из справочника (ПП 1931)"}
+      - {key: konsultaciya, label: "Признак консультации", type: bool}
+
+  jkh:
+    nazvanie: "Жилищно-коммунальное хозяйство"
+    polya:
+      - {key: vid_obrashcheniya, label: "Вид обращения", type: select,
+         classifier: vid_jkh, req: true}
+      - {key: sluzhba, label: "Коммунальная служба", type: text}
+      - {key: instrukcii, label: "Инструкции", type: textarea, auto: true}
+      - {key: konsultaciya, label: "Признак консультации", type: bool}
+
+  antiterror:
+    nazvanie: "Антитеррор"
+    polya:
+      - {key: vid_terakta, label: "Вид теракта", type: select,
+         classifier: vid_terakta, req: true}
+      - {key: pogibshih, label: "Погибших", type: int}
+      - {key: postradavshih, label: "Пострадавших", type: int}
+      - {key: podozrevaemyh, label: "Подозреваемых", type: int}
+      - {key: opisanie_podozrevaemyh, label: "Описание подозреваемых", type: textarea}
+      - {key: vooruzhenie, label: "Вооружение", type: textarea}
+      - {key: transport, label: "Транспорт", type: textarea}
+      - {key: napravlenie, label: "Направление движения", type: text}
+      - {key: povrezhdeniya, label: "Повреждения подозреваемых", type: textarea}
+
+# ============================================================ ЭРА-ГЛОНАСС
+
+era_glonass:
+  nazvanie: "ЭРА-ГЛОНАСС"
+  polya:
+    - {key: tip_vyzova, label: "Тип вызова", type: text, auto: true}
+    - {key: vid_srabatyvaniya, label: "Вид срабатывания", type: text, auto: true}
+    - {key: flag_postradavshih, label: "Признак пострадавших", type: bool, auto: true}
+    - {key: flag_golosovogo, label: "Голосовое соединение", type: bool, auto: true}
+    - {key: tip_ts, label: "Тип ТС", type: text, auto: true}
+    - {key: vin, label: "VIN", type: text, auto: true}
+    - {key: tip_dvigatelya, label: "Тип двигателя", type: text, auto: true}
+    - {key: napravlenie, label: "Направление движения", type: text, auto: true}
+    - {key: koord_1, label: "Координаты (недавние 1)", type: text, auto: true}
+    - {key: koord_2, label: "Координаты (недавние 2)", type: text, auto: true}
+    - {key: dostovernost, label: "Признак достоверности", type: bool, auto: true}
+    - {key: passazhirov, label: "Число пассажиров", type: int, auto: true}
+    - {key: id_vyzova_1, label: "Идентификатор вызова 1", type: text, auto: true}
+    - {key: id_vyzova_2, label: "Идентификатор вызова 2", type: text, auto: true}

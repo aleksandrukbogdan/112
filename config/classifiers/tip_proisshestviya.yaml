@@ -1,0 +1,44 @@
+# ============================================================
+#  ЗАГЛУШКА — ЗАМЕНИТЬ ЦЕЛИКОМ, КОГДА ПОЛУЧИМ ДОКУМЕНТ
+# ============================================================
+# Приложение № 11 к приказу МОБ СО № 65 ссылается на «утверждённый
+# Алгоритм» опроса по видам происшествий как на ОТДЕЛЬНЫЙ документ.
+# Его нет в самом приказе. Запросить у ГКУ СО «Территориальный центр
+# мониторинга и реагирования на ЧС» (оператор системы-112 области).
+#
+# ЧТО ДЕЛАТЬ, КОГДА ПРИДЁТ:
+#   1. заменить список items ниже
+#   2. поставить status: DEYSTVUET и указать istochnik
+#   3. перезапустить API — код не трогать
+#
+# Временное наполнение построено по направлениям реагирования
+# из формы 2/112 приказа МЧС № 192.
+status: ZAGLUSHKA
+zamenit_na: "Алгоритм опроса по видам происшествий (ГКУ СО ТЦМ)"
+istochnik_vremenno: "Форма 2/112 приказа МЧС 192 + приложение №11 приказа МОБ СО 65"
+
+items:
+  - {kod: POZHAR_KVARTIRA, nazvanie: "Пожар в жилом помещении", sluzhby: ["01"], protokol: pozhar}
+  - {kod: POZHAR_DOM,      nazvanie: "Пожар в частном доме",    sluzhby: ["01"], protokol: pozhar}
+  - {kod: POZHAR_TS,       nazvanie: "Загорание транспортного средства", sluzhby: ["01"], protokol: pozhar}
+  - {kod: POZHAR_LES,      nazvanie: "Лесной пожар", sluzhby: ["01","AVIALESOOHRANA","ROSLESHOZ"], protokol: pozhar}
+  - {kod: ZADYMLENIE,      nazvanie: "Задымление без открытого огня", sluzhby: ["01"], protokol: pozhar}
+  - {kod: DTP,             nazvanie: "Дорожно-транспортное происшествие", sluzhby: ["01","02","03"], protokol: dtp}
+  - {kod: DTP_TRASSA,      nazvanie: "ДТП на трассе", sluzhby: ["01","02","03","ROSAVTODOR"], protokol: dtp}
+  - {kod: MED_SOSTOYANIE,  nazvanie: "Ухудшение состояния здоровья", sluzhby: ["03"], protokol: smp}
+  - {kod: MED_TRAVMA,      nazvanie: "Травма", sluzhby: ["03"], protokol: smp}
+  - {kod: MED_RODY,        nazvanie: "Роды", sluzhby: ["03"], protokol: smp}
+  - {kod: PRAVONARUSHENIE, nazvanie: "Правонарушение", sluzhby: ["02"], protokol: policiya}
+  - {kod: DRAKA,           nazvanie: "Драка", sluzhby: ["02","03"], protokol: policiya}
+  - {kod: PROPAL_CHELOVEK, nazvanie: "Пропал человек", sluzhby: ["02"], protokol: policiya}
+  - {kod: ZAPAH_GAZA,      nazvanie: "Запах газа", sluzhby: ["04"], protokol: gaz}
+  - {kod: POVREZHDENIE_GAZ,nazvanie: "Повреждение газопровода", sluzhby: ["04","01"], protokol: gaz}
+  - {kod: PRORYV_VODY,     nazvanie: "Прорыв водопровода или отопления", sluzhby: ["JKH"], protokol: jkh}
+  - {kod: OTKLYUCHENIE,    nazvanie: "Отключение коммунального ресурса", sluzhby: ["JKH"], protokol: jkh}
+  - {kod: OBRUSHENIE,      nazvanie: "Обрушение конструкций", sluzhby: ["01","JKH","EDDS"], protokol: jkh}
+  - {kod: TERAKT,          nazvanie: "Террористический акт или угроза", sluzhby: ["ANTITERROR","02","CUKS"], protokol: antiterror}
+  - {kod: ZLONAMERENNY,    nazvanie: "Заведомо ложное сообщение об угрозе", sluzhby: ["02","EDDS"], protokol: antiterror, zlonamerenny: true}
+  - {kod: KONSULTACIYA,    nazvanie: "Консультативно-справочное обращение", sluzhby: [], nevyezdnoy: KONSULT}
+  - {kod: OSHIBOCHNY,      nazvanie: "Ошибочный вызов", sluzhby: [], nevyezdnoy: OSHIB}
+  - {kod: DETSKAYA_SHALOST,nazvanie: "Детская шалость", sluzhby: [], nevyezdnoy: SHALOST}
+  - {kod: PSIHOLOG,        nazvanie: "Обращение за психологической поддержкой", sluzhby: [], psiholog: true}

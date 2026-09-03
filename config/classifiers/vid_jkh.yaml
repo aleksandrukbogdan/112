@@ -1,0 +1,24 @@
+istochnik: ПП РФ 1931, спец.часть ЖКХ
+items:
+- kod: PRORYV_GVS
+  nazvanie: Прорыв горячего водоснабжения
+- kod: PRORYV_HVS
+  nazvanie: Прорыв холодного водоснабжения
+- kod: PRORYV_OTOPLENIE
+  nazvanie: Прорыв системы отопления
+- kod: KANALIZACIYA
+  nazvanie: Засор или прорыв канализации
+- kod: OTKL_VODA
+  nazvanie: Отключение водоснабжения
+- kod: OTKL_TEPLO
+  nazvanie: Отключение отопления
+- kod: OTKL_SVET
+  nazvanie: Отключение электроснабжения
+- kod: LIFT
+  nazvanie: Остановка лифта,человек в кабине
+- kod: KROVLYA
+  nazvanie: Протечка кровли
+- kod: OBRUSHENIE
+  nazvanie: Обрушение конструкций
+- kod: INOE
+  nazvanie: Иное

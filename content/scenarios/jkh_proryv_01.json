@@ -1,0 +1,49 @@
+{
+  "id": "jkh_proryv_01",
+  "nazvanie": "Прорыв трубы",
+  "versiya": "2.0",
+  "tip_proisshestviya": "PRORYV_VODY",
+  "sluzhby": [
+    "JKH"
+  ],
+  "slozhnost": 1,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Николай Иванович",
+    "vozrast": 72,
+    "stress": 3,
+    "sotrudnichestvo": 7,
+    "rech": "размеренная, отвлекается на посторонние темы",
+    "osobennost": "Рассказывает про соседей и управляющую компанию. Оператор должен вернуть к делу."
+  },
+  "situaciya": "В подвале прорвало трубу горячего водоснабжения.",
+  "card_truth": {
+    "rajon": "Орджоникидзевский",
+    "mesto_okato": "Екатеринбург",
+    "ulica": "Бакинских Комиссаров",
+    "dom": "58",
+    "uroven": "podval",
+    "tip_proisshestviya": "PRORYV_VODY",
+    "opisanie": "Прорыв трубы ГВС в подвале, затапливает",
+    "chislo_postradavshih": 0
+  },
+  "injections": [],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "jkh_proryv_01",
+  "title": "Прорыв трубы",
+  "difficulty": 1,
+  "services": [
+    "JKH"
+  ]
+}

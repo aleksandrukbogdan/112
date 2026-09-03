@@ -1,0 +1,45 @@
+{
+  "id": "psiholog_01",
+  "nazvanie": "Обращение в кризисе",
+  "versiya": "2.0",
+  "tip_proisshestviya": "PSIHOLOG",
+  "sluzhby": [],
+  "slozhnost": 3,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Не называет",
+    "vozrast": null,
+    "stress": 9,
+    "sotrudnichestvo": 3,
+    "rech": "несвязная, паузы, плач",
+    "osobennost": "Острая стрессовая реакция. Приложение № 13: уточнить необходимость поддержки и переключить на психолога."
+  },
+  "situaciya": "Человек в тяжёлом состоянии, речь несвязная.",
+  "card_truth": {
+    "tip_proisshestviya": "PSIHOLOG",
+    "opisanie": "Обращение за психологической поддержкой"
+  },
+  "injections": [
+    {
+      "t_sec": 20,
+      "text": "Мне очень плохо... я не могу больше...",
+      "podnimaet": "psiholog"
+    }
+  ],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "psiholog_01",
+  "title": "Обращение в кризисе",
+  "difficulty": 3,
+  "services": []
+}

@@ -1,0 +1,7 @@
+istochnik: "ПП РФ 1931; состояния ДДС — руководство АРМ"
+items:
+  - {kod: nachalo,          nazvanie: "Начало реагирования", default: true}
+  - {kod: obrabatyvaetsya,  nazvanie: "Обрабатывается"}
+  - {kod: reagirovanie,     nazvanie: "Реагирование"}
+  - {kod: zavershena,       nazvanie: "Завершена"}
+  - {kod: otmenena,         nazvanie: "Отменена"}

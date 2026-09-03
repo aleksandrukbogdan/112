@@ -1,0 +1,10 @@
+istochnik: "Вычисляется автоматически по числу пострадавших и погибших (руководство АРМ)"
+avtorasschet: true
+items:
+  - {kod: NET,           nazvanie: "Не ЧС",                   postradavshih_ot: 0,  pogibshih_ot: 0}
+  - {kod: LOKALNAYA,     nazvanie: "Локальная",               postradavshih_ot: 1,  pogibshih_ot: 1}
+  - {kod: MUNICIPALNAYA, nazvanie: "Муниципальная",           postradavshih_ot: 10, pogibshih_ot: 2}
+  - {kod: MEZHMUNICIP,   nazvanie: "Межмуниципальная",        postradavshih_ot: 50, pogibshih_ot: 5}
+  - {kod: REGIONALNAYA,  nazvanie: "Региональная",            postradavshih_ot: 50, pogibshih_ot: 10}
+  - {kod: MEZHREGION,    nazvanie: "Межрегиональная",         postradavshih_ot: 500,pogibshih_ot: 20}
+  - {kod: FEDERALNAYA,   nazvanie: "Федеральная",             postradavshih_ot: 500,pogibshih_ot: 50}

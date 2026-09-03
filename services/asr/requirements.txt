@@ -1,0 +1,6 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+soundfile==0.12.1
+numpy
+gigaam @ git+https://github.com/salute-developers/GigaAM.git

@@ -1,0 +1,171 @@
+# Общий протокол опроса — то, что задаётся при ЛЮБОМ вызове.
+# Источник: приказ МОБ СО от 15.02.2023 № 65, приложение № 11
+#           «Типовой алгоритм действий диспетчеров, диспетчеров ЕДДС
+#            при получении сообщения о происшествии или ЧС»
+#
+# Структура (вход → ключевые вопросы → решение) заимствована у MPDS,
+# СОДЕРЖАНИЕ — российское. Тексты MPDS лицензируются и не используются.
+
+istochnik: "Приказ МОБ СО 65, приложение № 11"
+versiya: "1.0"
+
+# ---------------------------------------------------------------- вход
+
+vhod:
+  privetstvie: "Здравствуйте, оператор-112 {mo}, слушаю Вас."
+  pervy_vopros:
+    id: povod
+    text: "Скажите, что у Вас произошло?"
+    zapolnyaet: uchol.povod
+    ves: 3
+
+# ---------------------------------------------------------------- адрес
+# Порядок ЖЁСТКИЙ — воспроизводит последовательность из приложения № 11.
+
+adres:
+  - {id: a_rajon,   text: "В каком районе это происходит?",       field: rajon,        ves: 3}
+  - {id: a_gorod,   text: "Город, посёлок или населённый пункт?", field: mesto_okato,  ves: 3}
+  - {id: a_ulica,   text: "Улица?",                                field: ulica,        ves: 3}
+  - {id: a_dom,     text: "Номер дома?",                           field: dom,          ves: 3}
+  - {id: a_korpus,  text: "Корпус, строение?",                     field: korpus,       ves: 1, opt: true}
+  - {id: a_podezd,  text: "Номер подъезда?",                       field: podezd,       ves: 2}
+  - {id: a_etazh,   text: "Какой этаж?",                           field: etazh,        ves: 2}
+  - {id: a_etazhnost, text: "Сколько этажей в доме?",              field: etazhnost,    ves: 2}
+  - {id: a_kvartira,text: "Номер квартиры?",                       field: kvartira,     ves: 2}
+  - {id: a_domofon, text: "Код подъезда или домофона?",            field: kod_domofona, ves: 2}
+  - {id: a_podezd_put, text: "Как лучше подъехать?",               field: podezd_put,   ves: 3}
+
+# ---------------------------------------------------------------- условные ветки
+# Приложение № 11 и № 15: срабатывают по обстановке.
+
+usloviya:
+  - id: u_orientiry
+    esli: "net_tochnogo_adresa"
+    text: "Какие рядом есть заметные ориентиры?"
+    field: orientiry
+    ves: 3
+    obosnovanie: "Если заявитель не может назвать точный адрес"
+
+  - id: u_perekrestok
+    esli: "perekrestok"
+    text: "Назовите вторую улицу перекрёстка."
+    field: perekrestok
+    ves: 3
+    obosnovanie: "Обязательно указать вторую улицу в дополнительном поле"
+
+  - id: u_uroven
+    esli: "podval_ili_cherdak"
+    text: "Это подвал или чердак здания?"
+    field: uroven
+    ves: 2
+
+  - id: u_gaz
+    esli: "chastny_dom or tip in [POZHAR_DOM, POZHAR_KVARTIRA]"
+    text: "Дом газифицирован?"
+    field: gazifikaciya
+    ves: 3
+    obosnovanie: "Указать, дом газифицирован или нет"
+
+  - id: u_trassa_km
+    esli: "dtp_na_trasse"
+    text: "Какой километр трассы?"
+    field: kilometr
+    ves: 3
+  - id: u_trassa_napr
+    esli: "dtp_na_trasse"
+    text: "В каком направлении?"
+    field: napravlenie
+    ves: 3
+  - id: u_trassa_np
+    esli: "dtp_na_trasse"
+    text: "Какой ближайший населённый пункт?"
+    field: blizhayshiy_np
+    ves: 3
+
+  - id: u_massovoe_kol
+    esli: "massovoe_prebyvanie"
+    text: "Сколько людей находится на объекте?"
+    field: kolichestvo_lyudey
+    ves: 3
+    obosnovanie: "Объект с массовым пребыванием людей"
+  - id: u_massovoe_evak
+    esli: "massovoe_prebyvanie"
+    text: "Какие меры по эвакуации приняты?"
+    field: mery_evakuacii
+    ves: 3
+
+# ---------------------------------------------------------------- заявитель
+
+zayavitel:
+  - {id: z_familiya, text: "Представьтесь, пожалуйста. Ваша фамилия?", field: familiya, ves: 3}
+  - {id: z_imya,     text: "Имя?",                                     field: imya,     ves: 3}
+  - {id: z_telefon,  text: "Номер телефона для обратной связи?",       field: telefon,  ves: 3}
+  - {id: z_dr,       text: "Дата рождения?",                           field: data_rozhdeniya, ves: 1, opt: true}
+
+# ---------------------------------------------------------------- происшествие
+
+proisshestvie:
+  - {id: p_opisanie,  text: "Опишите подробнее, что происходит.", field: opisanie, ves: 3}
+  - {id: p_postradav, text: "Есть пострадавшие? Сколько?",        field: chislo_postradavshih, ves: 3}
+  - {id: p_ugroza,    text: "Есть ли угроза жизни людей?",        field: ugroza_lyudyam, ves: 3}
+
+# ---------------------------------------------------------------- переключения
+# Приложение № 11: два обязательных правила.
+
+perekluchenie:
+  - id: per_psiholog
+    trigger: "vozbuzhdennost or nesvyaznaya_rech"
+    deystvie: psiholog
+    snachala_utochnit: "Вам нужна помощь психолога?"
+    obosnovanie: >
+      В случае повышенной возбуждённости позвонившего или несвязной речи
+      диспетчер уточняет необходимость дистанционной психологической
+      поддержки и при положительном ответе переключает на психолога ЦОВ.
+    kriterii_privlecheniya:      # приложение № 13
+      - ostraya_stressovaya_reakciya
+      - trudnaya_zhiznennaya_situaciya
+      - sam_prosit
+    predstavlenie_psihologa: "Психолог 112"
+    max_sec: 1800
+
+  - id: per_perevodchik
+    trigger: "yazyk != ru"
+    deystvie: perevodchik
+    obosnovanie: >
+      Если язык, на котором разговаривает позвонивший, отличается от русского
+      и диспетчер не понимает, о чём идёт речь, — переключить на переводчика ЦОВ.
+
+# ---------------------------------------------------------------- признак «У»
+
+priznak_u:
+  field: ugroza_chs
+  obosnovanie: >
+    При получении сведений о происшествиях с признаками социально значимых
+    либо попадающих под приказ МЧС России от 05.07.2021 № 429 — поставить
+    знак «У» в блоке «Описание происшествия» для доведения в ЦУКС и СКЦ.
+  ssylki:
+    - "Письмо НЦУКС от 07.11.2011 № 13-3-4315"
+    - "Приказ МЧС России от 05.07.2021 № 429"
+  triggery:
+    - obekt_promyshlennosti
+    - obekt_transporta
+    - obekt_energetiki
+    - gazo_teplo_vodosnabzhenie
+    - massovoe_prebyvanie
+
+# ---------------------------------------------------------------- завершение
+
+zavershenie:
+  pravilo_perevoda: >
+    При передаче вызова диспетчер убеждается в соединении заявителя
+    с необходимой службой, извещает диспетчера задействованной службы
+    и ОСТАЁТСЯ НА ЛИНИИ до момента убеждения, что вызов переведён
+    по компетенции. При некомпетентности принявшей службы — просит
+    заявителя остаться на линии и согласует дальнейший перевод
+    со старшим диспетчером смены.
+  istochnik: "Приказ МОБ СО 65, п.51"
+
+  obratny_vyzov: >
+    При внезапном прерывании соединения инициировать обратный вызов
+    в течение 10 секунд, не менее 3 попыток, ожидание ответа 1 минута.
+  istochnik_obratnogo: "ПП РФ 1931 п.9 подп.р"

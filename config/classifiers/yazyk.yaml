@@ -1,0 +1,9 @@
+istochnik: "ПП РФ 1931; приказ МОБ СО 65 прил.11 — иной язык требует переводчика ЦОВ"
+items:
+  - {kod: ru, nazvanie: "Русский", default: true}
+  - {kod: en, nazvanie: "Английский", trebuet_perevodchika: true}
+  - {kod: tg, nazvanie: "Таджикский", trebuet_perevodchika: true}
+  - {kod: uz, nazvanie: "Узбекский", trebuet_perevodchika: true}
+  - {kod: ky, nazvanie: "Киргизский", trebuet_perevodchika: true}
+  - {kod: zh, nazvanie: "Китайский", trebuet_perevodchika: true}
+  - {kod: other, nazvanie: "Иной", trebuet_perevodchika: true}

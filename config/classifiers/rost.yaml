@@ -1,0 +1,10 @@
+istochnik: ПП РФ 1931, описание подозреваемых
+items:
+- kod: NIZKY
+  nazvanie: Низкий (до 165 см)
+- kod: SREDNIY
+  nazvanie: Средний (165–180 см)
+- kod: VYSOKY
+  nazvanie: Высокий (свыше 180 см)
+- kod: NEIZV
+  nazvanie: Не определён

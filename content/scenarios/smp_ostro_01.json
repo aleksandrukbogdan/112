@@ -1,0 +1,60 @@
+{
+  "id": "smp_ostro_01",
+  "nazvanie": "Мужчина без сознания",
+  "versiya": "2.0",
+  "tip_proisshestviya": "MED_SOSTOYANIE",
+  "sluzhby": [
+    "03"
+  ],
+  "slozhnost": 3,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Дмитрий",
+    "vozrast": 34,
+    "stress": 9,
+    "sotrudnichestvo": 8,
+    "rech": "быстрая, обрывистая, паника",
+    "osobennost": "Отец потерял сознание. Дышит хрипло. Заявитель торопит и перебивает."
+  },
+  "situaciya": "Мужчина 62 лет упал дома, без сознания, дыхание шумное.",
+  "card_truth": {
+    "rajon": "Ленинский",
+    "mesto_okato": "Екатеринбург",
+    "ulica": "Щорса",
+    "dom": "32",
+    "kvartira": "114",
+    "podezd": "3",
+    "etazh": "5",
+    "etazhnost": 9,
+    "kod_domofona": "114К",
+    "tip_proisshestviya": "MED_SOSTOYANIE",
+    "opisanie": "Мужчина 62 лет без сознания, дыхание шумное",
+    "chislo_postradavshih": 1,
+    "ugroza_lyudyam": true
+  },
+  "injections": [
+    {
+      "t_sec": 25,
+      "text": "Он захрипел! Что делать?!",
+      "podnimaet": "ugroza"
+    }
+  ],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "smp_ostro_01",
+  "title": "Мужчина без сознания",
+  "difficulty": 3,
+  "services": [
+    "03"
+  ]
+}

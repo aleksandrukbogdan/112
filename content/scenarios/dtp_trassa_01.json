@@ -1,0 +1,63 @@
+{
+  "id": "dtp_trassa_01",
+  "nazvanie": "ДТП на трассе",
+  "versiya": "2.0",
+  "tip_proisshestviya": "DTP_TRASSA",
+  "sluzhby": [
+    "01",
+    "02",
+    "03"
+  ],
+  "slozhnost": 3,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Сергей",
+    "vozrast": 41,
+    "stress": 6,
+    "sotrudnichestvo": 9,
+    "rech": "собранная, но не знает километр",
+    "osobennost": "Проезжал мимо. Километр назовёт только если спросить прямо."
+  },
+  "situaciya": "Столкновение двух машин на трассе, одна в кювете.",
+  "card_truth": {
+    "doroga": "Р-354 Екатеринбург — Курган",
+    "kilometr": "48",
+    "napravlenie": "в сторону Кургана",
+    "blizhayshiy_np": "Богданович",
+    "rajon": "Богдановичский",
+    "mesto_okato": "Богданович",
+    "ulica": "трасса",
+    "dom": "-",
+    "tip_proisshestviya": "DTP_TRASSA",
+    "opisanie": "Столкновение двух легковых, одна в кювете",
+    "chislo_postradavshih": 2,
+    "ugroza_lyudyam": true
+  },
+  "injections": [
+    {
+      "t_sec": 45,
+      "text": "Из-под капота дым пошёл!",
+      "podnimaet": "sluzhba_01"
+    }
+  ],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "dtp_trassa_01",
+  "title": "ДТП на трассе",
+  "difficulty": 3,
+  "services": [
+    "01",
+    "02",
+    "03"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "id": "gaz_zapah_01",
+  "nazvanie": "Запах газа в подъезде",
+  "versiya": "2.0",
+  "tip_proisshestviya": "ZAPAH_GAZA",
+  "sluzhby": [
+    "04"
+  ],
+  "slozhnost": 2,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Ольга",
+    "vozrast": 45,
+    "stress": 5,
+    "sotrudnichestvo": 9,
+    "rech": "спокойная, чёткая",
+    "osobennost": "Разумная, отвечает по делу."
+  },
+  "situaciya": "Резкий запах газа на лестничной площадке многоквартирного дома.",
+  "card_truth": {
+    "rajon": "Кировский",
+    "mesto_okato": "Екатеринбург",
+    "ulica": "Малышева",
+    "dom": "128",
+    "podezd": "2",
+    "etazh": "4",
+    "etazhnost": 9,
+    "kod_domofona": "К4512",
+    "tip_proisshestviya": "ZAPAH_GAZA",
+    "opisanie": "Резкий запах газа на площадке 4 этажа",
+    "ugroza_lyudyam": true,
+    "chislo_postradavshih": 0
+  },
+  "injections": [],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "gaz_zapah_01",
+  "title": "Запах газа в подъезде",
+  "difficulty": 2,
+  "services": [
+    "04"
+  ]
+}

@@ -1,0 +1,38 @@
+# Временные нормативы системы-112.
+# Источник: ПП РФ от 12.11.2021 № 1931, п.9 подп.«р»
+#           продублировано в форме 1/112 приказа МЧС от 14.03.2022 № 192
+#           и в приказе МОБ СО от 15.02.2023 № 65, раздел VII, п.62
+#
+# МЕНЯТЬ ЗДЕСЬ. В коде этих чисел нет.
+
+istochnik: "ПП РФ 1931 п.9 подп.р / форма 1/112 приказа МЧС 192"
+
+otvet_sredniy_sec: 8
+otvet_max_sec: 20
+otvet_max_percentil: 98
+
+# главный норматив: опрос + карточка доступна ДДС
+opros_i_kartochka_sec: 75
+
+podtverzhdenie_dds_sec: 30
+
+obratny_vyzov_sec: 10
+obratny_vyzov_popytok: 3
+obratny_vyzov_ozhidanie_sec: 60
+
+konsultaciya_sec: 120
+psiholog_sec: 1800
+hranenie_let: 3
+
+# Пороги подсказок таймера — доля от opros_i_kartochka_sec
+porogi_podskazok:
+  vnimanie: 0.60      # 45 сек — мягкое напоминание
+  trevoga: 0.85       # 64 сек — что осталось незаполненным
+  prosrocheno: 1.00   # 75 сек — норматив превышен
+
+nadezhnost:
+  veroyatnost_priema: 0.9995
+  veroyatnost_obrabotki: 0.9995
+  veroyatnost_priema_info: 0.9995
+  celevaya_funkciya: 0.9985
+  poteri_golosovogo_soedineniya: 0.001

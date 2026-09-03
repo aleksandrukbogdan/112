@@ -1,0 +1,22 @@
+istochnik: ПП РФ 1931, транспортные средства
+items:
+- kod: BELY
+  nazvanie: Белый
+- kod: CHERNY
+  nazvanie: Чёрный
+- kod: SERY
+  nazvanie: Серый
+- kod: SEREBRISTY
+  nazvanie: Серебристый
+- kod: KRASNY
+  nazvanie: Красный
+- kod: SINY
+  nazvanie: Синий
+- kod: ZELENY
+  nazvanie: Зелёный
+- kod: ZHELTY
+  nazvanie: Жёлтый
+- kod: KORICHNEVY
+  nazvanie: Коричневый
+- kod: INOY
+  nazvanie: Иной

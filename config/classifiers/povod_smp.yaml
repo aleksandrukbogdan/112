@@ -1,0 +1,18 @@
+# Поводы к вызову скорой медицинской помощи.
+# Источник: приказ Минздрава России от 20.06.2013 № 388н, п.11 и п.13
+#
+# Это не только классификатор, но и ПРАВИЛО РЕШЕНИЯ:
+# повод с forma: ekstrennaya означает угрозу жизни и немедленное реагирование.
+istochnik: "Приказ Минздрава 388н, п.11 и п.13"
+items:
+  - {kod: SOZNANIE,  nazvanie: "Нарушения сознания",               forma: ekstrennaya, punkt: "11а"}
+  - {kod: DYHANIE,   nazvanie: "Нарушения дыхания",                forma: ekstrennaya, punkt: "11б"}
+  - {kod: KROVOOBR,  nazvanie: "Нарушения системы кровообращения", forma: ekstrennaya, punkt: "11в"}
+  - {kod: PSIH,      nazvanie: "Психические расстройства с действиями, опасными для пациента или окружающих", forma: ekstrennaya, punkt: "11г"}
+  - {kod: BOL,       nazvanie: "Болевой синдром",                  forma: ekstrennaya, punkt: "11д"}
+  - {kod: TRAVMA,    nazvanie: "Травмы, отравления, ранения с угрожающим жизни кровотечением либо повреждением внутренних органов", forma: ekstrennaya, punkt: "11е"}
+  - {kod: OZHOG,     nazvanie: "Термические и химические ожоги",   forma: ekstrennaya, punkt: "11ж"}
+  - {kod: KROVOTECH, nazvanie: "Кровотечения любой этиологии",     forma: ekstrennaya, punkt: "11з"}
+  - {kod: RODY,      nazvanie: "Роды, угроза прерывания беременности", forma: ekstrennaya, punkt: "11и"}
+  - {kod: OSTROE_BEZ_UGROZY, nazvanie: "Острое заболевание или обострение хронического без явных признаков угрозы жизни", forma: neotlozhnaya, punkt: "13а"}
+  - {kod: KONSTATACIYA, nazvanie: "Констатация смерти", forma: neotlozhnaya, punkt: "13б"}

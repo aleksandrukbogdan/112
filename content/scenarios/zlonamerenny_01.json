@@ -1,0 +1,52 @@
+{
+  "id": "zlonamerenny_01",
+  "nazvanie": "Заведомо ложное сообщение",
+  "versiya": "2.0",
+  "tip_proisshestviya": "ZLONAMERENNY",
+  "sluzhby": [
+    "02",
+    "EDDS"
+  ],
+  "slozhnost": 3,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Не называет",
+    "vozrast": null,
+    "stress": 2,
+    "sotrudnichestvo": 3,
+    "rech": "нарочито спокойная, издевательская",
+    "osobennost": "Сообщает об угрозе взрыва. Обрабатывается как злонамеренный: полиция и ЕДДС обязательно."
+  },
+  "situaciya": "Анонимное сообщение об угрозе взрыва в торговом центре.",
+  "card_truth": {
+    "rajon": "Верх-Исетский",
+    "mesto_okato": "Екатеринбург",
+    "ulica": "Репина",
+    "dom": "94",
+    "tip_proisshestviya": "ZLONAMERENNY",
+    "opisanie": "Анонимное сообщение об угрозе взрыва",
+    "obekt_okpo": "торговый центр",
+    "kolichestvo_lyudey": 800,
+    "ugroza_chs": true
+  },
+  "injections": [],
+  "nevyezdnoy": null,
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "zlonamerenny_01",
+  "title": "Заведомо ложное сообщение",
+  "difficulty": 3,
+  "services": [
+    "02",
+    "EDDS"
+  ]
+}

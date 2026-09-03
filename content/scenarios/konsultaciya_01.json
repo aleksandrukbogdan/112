@@ -1,0 +1,39 @@
+{
+  "id": "konsultaciya_01",
+  "nazvanie": "Консультативное обращение",
+  "versiya": "2.0",
+  "tip_proisshestviya": "KONSULTACIYA",
+  "sluzhby": [],
+  "slozhnost": 1,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": "Марина",
+    "vozrast": 38,
+    "stress": 2,
+    "sotrudnichestvo": 8,
+    "rech": "спокойная",
+    "osobennost": "Спрашивает телефон аварийной службы. Реагирования не требует."
+  },
+  "situaciya": "Женщина хочет узнать, куда обращаться по поводу отключения воды по графику.",
+  "card_truth": {
+    "tip_proisshestviya": "KONSULTACIYA",
+    "opisanie": "Справка о плановом отключении воды"
+  },
+  "injections": [],
+  "nevyezdnoy": "KONSULT",
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "konsultaciya_01",
+  "title": "Консультативное обращение",
+  "difficulty": 1,
+  "services": []
+}

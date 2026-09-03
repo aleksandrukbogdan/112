@@ -1,0 +1,39 @@
+{
+  "id": "lozhny_shalost_01",
+  "nazvanie": "Детская шалость",
+  "versiya": "2.0",
+  "tip_proisshestviya": "DETSKAYA_SHALOST",
+  "sluzhby": [],
+  "slozhnost": 1,
+  "istochnik_protokola": "Приказ МОБ СО 65, приложение № 11",
+  "zayavitel": {
+    "imya": null,
+    "vozrast": 9,
+    "stress": 1,
+    "sotrudnichestvo": 2,
+    "rech": "детский голос, хихиканье, фоном другие дети",
+    "osobennost": "Ребёнок балуется. Не должен получить реагирование, но и грубости в ответ."
+  },
+  "situaciya": "Ребёнок звонит из шалости. На фоне смех.",
+  "card_truth": {
+    "tip_proisshestviya": "DETSKAYA_SHALOST",
+    "opisanie": "Детская шалость, реагирование не требуется"
+  },
+  "injections": [],
+  "nevyezdnoy": "SHALOST",
+  "kriterii": {
+    "normativ_sec": 75,
+    "obyazatelnye": [
+      "rajon",
+      "mesto_okato",
+      "ulica",
+      "dom",
+      "tip_proisshestviya",
+      "opisanie"
+    ]
+  },
+  "slug": "lozhny_shalost_01",
+  "title": "Детская шалость",
+  "difficulty": 1,
+  "services": []
+}

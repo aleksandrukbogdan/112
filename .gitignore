@@ -1,0 +1,12 @@
+models/*
+!models/.gitkeep
+voicebank/*
+!voicebank/.gitkeep
+node_modules/
+.next/
+__pycache__/
+.env
+.env.bak
+venv_112/
+.ipynb_checkpoints/
+112.txt

@@ -1,0 +1,79 @@
+# Направления реагирования.
+# Источник: форма 2/112 приказа МЧС от 14.03.2022 № 192 (строки 2–13м)
+#
+# ВАЖНО: специальных частей УКИО шесть, а направлений реагирования
+# тринадцать. Не путать: ukio_chast есть не у всех.
+
+istochnik: "Форма 2/112 приказа МЧС 192"
+
+routes:
+  - kod: "01"
+    nazvanie: "Пожарно-спасательная служба"
+    korotko: "Пожарная"
+    ukio_chast: pozharnaya
+    hotkey: "Alt+1"
+    forma_2_112: "2"
+    etapy_brigady: false        # у 01 этапов нет (руководство АРМ)
+  - kod: "02"
+    nazvanie: "Полиция"
+    korotko: "Полиция"
+    ukio_chast: policiya
+    hotkey: "Alt+2"
+    forma_2_112: "3"
+    etapy_brigady: true
+  - kod: "03"
+    nazvanie: "Скорая медицинская помощь"
+    korotko: "Скорая"
+    ukio_chast: smp
+    hotkey: "Alt+3"
+    forma_2_112: "4"
+    etapy_brigady: true
+  - kod: "04"
+    nazvanie: "Аварийная служба газовой сети"
+    korotko: "Газ"
+    ukio_chast: gaz
+    hotkey: "Alt+4"
+    forma_2_112: "5"
+    etapy_brigady: true
+  - kod: "JKH"
+    nazvanie: "Система мониторинга аварий на объектах ЖКХ"
+    korotko: "ЖКХ"
+    ukio_chast: jkh
+    hotkey: "Alt+5"
+    forma_2_112: "9"
+    etapy_brigady: true
+  - kod: "ANTITERROR"
+    nazvanie: "Служба «Антитеррор»"
+    korotko: "Антитеррор"
+    ukio_chast: antiterror
+    hotkey: "Alt+6"
+    forma_2_112: "6"
+    etapy_brigady: true
+  - kod: "CUKS"
+    nazvanie: "ЦУКС территориального органа МЧС"
+    korotko: "ЦУКС"
+    forma_2_112: "7"
+  - kod: "EDDS"
+    nazvanie: "Единая дежурно-диспетчерская служба"
+    korotko: "ЕДДС"
+    forma_2_112: "8"
+  - kod: "ROSGVARDIA"
+    nazvanie: "Росгвардия"
+    korotko: "Росгвардия"
+    forma_2_112: "10"
+  - kod: "AVIALESOOHRANA"
+    nazvanie: "ФБУ «Авиалесоохрана»"
+    korotko: "Авиалесоохрана"
+    forma_2_112: "11"
+  - kod: "ROSAVTODOR"
+    nazvanie: "Росавтодор"
+    korotko: "Росавтодор"
+    forma_2_112: "12"
+  - kod: "ROSLESHOZ"
+    nazvanie: "Рослесхоз"
+    korotko: "Рослесхоз"
+    forma_2_112: "13"
+  - kod: "INOY_SUBEKT"
+    nazvanie: "Система-112 иного субъекта РФ"
+    korotko: "Другой регион"
+    forma_2_112: "13м"
