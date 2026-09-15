@@ -1,0 +1,578 @@
+# Реестр требований. ID стабильны: на них ссылается audit.md и canvas.
+# status: covered | partial | gap
+# priority: must | should | optional
+# source: tz | arm
+#
+# Дата: 2026-09-15
+# Источники:
+#   tz  — input_task/9. Деп Обороны и ЧС.pdf
+#   arm — input_task/Работа с АРМ-112 для ДДС от ОКр_ГСИ.pdf
+
+meta:
+  date: "2026-09-15"
+  product_now: "Тренажёр оператора-112 (приём вызова, УКИО, регион СО)"
+  product_tz: "Тренажёр диспетчера ДДС на эмуляции АРМ-112 (Москва)"
+  not_in_scope:
+    - "input_task/Классификатор_происшествий_v_046_24_корректировка_МВД_+_Департамент.xlsx"
+    - "input_task/Билеты- задачи по C 112 . АГС_ГСИ.pdf"
+
+items:
+
+  # ---- назначение и границы ТЗ ----
+  - id: TZ-GOAL-01
+    source: tz
+    section: "1–2"
+    title: "Обучение операторов ДДС Москвы"
+    statement: "Сервис готовит операторов ДДС, взаимодействующих с системой-112 города Москвы, а не операторов приёма вызова 112."
+    priority: must
+    status: gap
+    evidence: "UI /trainee и /assistant — рабочее место оператора-112; регион so.yaml — Свердловская область."
+    code:
+      - web/app/trainee/page.jsx
+      - web/app/assistant/page.jsx
+      - config/regions/so.yaml
+
+  - id: TZ-AUD-01
+    source: tz
+    section: "2"
+    title: "Аудитория: Гормост, ЖКХ, прочие ДДС"
+    statement: "Обучение специалистов ГБУ «Гормост», жилищных служб и других ДДС; в ленту попадают только профильные события службы."
+    priority: must
+    status: gap
+    evidence: "Нет ролей служб ДДС и фильтра ленты по профилю (Мосводоканал, газ, управа)."
+    code: []
+
+  - id: TZ-AUD-02
+    source: tz
+    section: "2"
+    title: "База, переподготовка, аттестация"
+    statement: "Режимы базового обучения, периодической переподготовки и аттестационных мероприятий."
+    priority: must
+    status: partial
+    evidence: "В схеме session.mode IN ('training','exam','demo'), в UI режимы exam/аттестация не выведены."
+    code:
+      - db/001_schema.sql
+
+  - id: TZ-BOUND-01
+    source: tz
+    section: "4"
+    title: "Не обрабатывать реальные вызовы"
+    statement: "Сервис не обрабатывает боевые экстренные вызовы и не является основной системой-112."
+    priority: must
+    status: covered
+    evidence: "Учебный контур Docker, сценарии JSON, LLM-заявитель; боевого контура Москвы нет."
+    code:
+      - docker-compose.yml
+      - content/scenarios/
+
+  - id: TZ-BOUND-02
+    source: tz
+    section: "4, 6"
+    title: "Изолированный локальный контур"
+    statement: "Работа без доступа к внешним сетям; имитация интерфейса системы-112 в учебном комплексе."
+    priority: must
+    status: partial
+    evidence: "BIND_HOST по умолчанию 127.0.0.1, но LLM/веса ASR могут ходить наружу; UI не копирует ПОВ-112."
+    code:
+      - .env.example
+      - docker-compose.yml
+
+  - id: TZ-CORE-01
+    source: tz
+    section: "5"
+    title: "Эмуляция процессов в реальном времени"
+    statement: "Эмуляция работы с карточкой/вызовом в реальном времени с таймером."
+    priority: must
+    status: partial
+    evidence: "Живой диалог и таймер 75 с есть; поток ДДС (карточка уже создана) отсутствует."
+    code:
+      - web/app/trainee/page.jsx
+      - web/components/NormBar.jsx
+
+  - id: TZ-CORE-02
+    source: tz
+    section: "3, 5"
+    title: "Имитация входящих вызовов VoIP или текстом"
+    statement: "Входящий вызов через виртуальную IP-телефонию (SIP) или текстовые сообщения."
+    priority: must
+    status: partial
+    evidence: "Текст и браузерный MediaRecorder+ASR есть. SIP/IP-телефон нет."
+    code:
+      - web/lib/recorder.js
+      - services/asr/app.py
+
+  - id: TZ-CORE-03
+    source: tz
+    section: "5"
+    title: "Управление обучением и сложность"
+    statement: "Распределение заданий по уровням сложности, назначение группам."
+    priority: must
+    status: partial
+    evidence: "У сценариев есть difficulty 1–5 и org_group в seed. Нет UI назначения и старта занятия преподавателем."
+    code:
+      - db/001_schema.sql
+      - db/002_seed.sql
+      - content/scenarios/
+
+  - id: TZ-CORE-04
+    source: tz
+    section: "5–6, роль преподавателя"
+    title: "Контроль тайминга, эталон, грамматика"
+    statement: "Сравнение действий и ручного ввода с эталоном; контроль регламента; проверка грамматики. Тайминг по умолчанию 30 с."
+    priority: must
+    status: partial
+    evidence: "scoring.py сравнивает чек-лист сценария (не эталон текста ДДС). Главный норматив 75 с; 30 с есть как podtverzhdenie_dds_sec, не как таймер занятия."
+    code:
+      - services/api/app/scoring.py
+      - config/normativy.yaml
+
+  - id: TZ-CORE-05
+    source: tz
+    section: "5"
+    title: "Нейросетевая оценка действий"
+    statement: "Оценка эффективности подготовки на основе ML/ИИ, включая анализ ручного ввода."
+    priority: must
+    status: partial
+    evidence: "LLM генерирует заявителя; оценка — правила (протокол/скорость/манера), не сверка текста ДДС с эталоном."
+    code:
+      - services/api/app/scoring.py
+      - services/api/app/llm.py
+
+  - id: TZ-CORE-06
+    source: tz
+    section: "5"
+    title: "Учёт результатов и отчётность"
+    statement: "Ведение прогресса операторов и детальная отчётность по занятию (действия, ошибки, время, грамматика)."
+    priority: must
+    status: partial
+    evidence: "Разбор вызова, PDF, /analytics. Нет отчёта о занятии группы и грамматики карточки ДДС."
+    code:
+      - web/app/analytics/page.jsx
+      - services/api/app/report_pdf.py
+
+  - id: TZ-AUTH-01
+    source: tz
+    section: "5, 8, 9"
+    title: "Аутентификация и RBAC"
+    statement: "Многоуровневая аутентификация при каждом входе; разграничение admin / instructor / trainee; запрет пересечения функций."
+    priority: must
+    status: gap
+    evidence: "Роли в CHECK app_user.role, экрана логина нет, все кабинеты открыты с главной."
+    code:
+      - db/001_schema.sql
+      - web/app/page.jsx
+      - web/lib/api.js
+
+  - id: TZ-ADMIN-01
+    source: tz
+    section: "8 Администратор"
+    title: "Кабинет администратора"
+    statement: "Старт/стоп сервисов, мониторинг, бэкап, CRUD пользователей, политики безопасности, журналы. Не меняет оценки во время занятия."
+    priority: must
+    status: gap
+    evidence: "Роль admin в схеме есть, UI и API админки нет. Операции — Makefile/docker вручную."
+    code:
+      - db/001_schema.sql
+      - Makefile
+
+  - id: TZ-INSTR-01
+    source: tz
+    section: "8 Преподаватель, сценарий настройки"
+    title: "Преподаватель: сценарии, группы, эталон, занятие"
+    statement: "CRUD сценариев, генерация нейросетью, утверждение эталона, назначение группам, старт/стоп занятия, обратная связь, инсайты по ошибкам."
+    priority: must
+    status: partial
+    evidence: "Есть мониторинг сессии, инъекции, ручной зачёт интентов. Нет CRUD, эталона, назначения, отчёта занятия."
+    code:
+      - web/app/instructor/page.jsx
+      - services/api/app/main.py
+
+  - id: TZ-TRAIN-01
+    source: tz
+    section: "8 Обучающийся"
+    title: "Обучающийся: назначенные задания и свой прогресс"
+    statement: "Только назначенные сценарии; эмуляция АРМ-112; свои оценки, история ошибок, рекомендации; нельзя удалять результаты."
+    priority: must
+    status: partial
+    evidence: "Свободный выбор сценария из списка. Прогресс — аналитика с mock-данными. Профиля обучающегося с историей нет."
+    code:
+      - web/app/trainee/page.jsx
+      - web/app/analytics/page.jsx
+
+  - id: TZ-SCN-01
+    source: tz
+    section: "10 Настройка учебной среды"
+    title: "Сценарий настройки среды"
+    statement: "Категории событий, генерация эталона, профильная лента службы, предпросмотр с подсветкой правильных действий, коррекция эталона."
+    priority: must
+    status: gap
+    evidence: "Нет конструктора занятия и эталона ДДС."
+    code: []
+
+  - id: TZ-SCN-02
+    source: tz
+    section: "10 Карточки"
+    title: "Занятие: заполнение карточки"
+    statement: "Имитация звонка и заполнение карточки в интерфейсе АРМ-112; отчёт по времени и грамматике."
+    priority: must
+    status: partial
+    evidence: "Заполнение упрощённой карточки в /trainee после диалога с заявителем. Это роль оператора-112, не ДДС; UI не АРМ-112."
+    code:
+      - web/app/trainee/page.jsx
+
+  - id: TZ-SCN-03
+    source: tz
+    section: "10 Действия с карточками"
+    title: "Занятие: действия с готовой карточкой"
+    statement: "Случайная КП; действие обучающегося, включая ввод текста («Сообщение принято, дежурная бригада направлена»); следующая карточка."
+    priority: must
+    status: gap
+    evidence: "Нет потока «карточка уже создана → статус ДДС + комментарий»."
+    code: []
+
+  - id: TZ-SLA-30
+    source: tz
+    section: "8 Преподаватель"
+    title: "Тайминг задания по умолчанию 30 с"
+    statement: "Преподаватель задаёт рамку; значение по умолчанию — 30 секунд."
+    priority: must
+    status: partial
+    evidence: "podtverzhdenie_dds_sec: 30 в YAML. UI занятия завязан на 75 с опроса."
+    code:
+      - config/normativy.yaml
+      - web/components/NormBar.jsx
+
+  - id: TZ-NFR-TLS
+    source: tz
+    section: "9"
+    title: "TLS внутри контура"
+    statement: "Шифрование всех передаваемых данных TLS/SSL внутри учебного контура."
+    priority: must
+    status: gap
+    evidence: "HTTP localhost, TLS не поднимается стеком."
+    code:
+      - docker-compose.yml
+
+  - id: TZ-NFR-BACKUP
+    source: tz
+    section: "5, 9"
+    title: "Бэкап не реже раза в сутки"
+    statement: "Резервное копирование данных с периодичностью не реже 1 раза в сутки."
+    priority: must
+    status: gap
+    evidence: "Тома Docker есть, регламента и джоба бэкапа нет."
+    code:
+      - docker-compose.yml
+
+  - id: TZ-NFR-AUDIT
+    source: tz
+    section: "9"
+    title: "Аудит действий 6 месяцев"
+    statement: "Журналирование всех значимых действий пользователей; хранение журналов безопасности не менее 6 месяцев."
+    priority: must
+    status: partial
+    evidence: "session_events append-only для вызова. Нет аудита логинов/админки и политики хранения 6 мес."
+    code:
+      - db/001_schema.sql
+
+  - id: TZ-NFR-PERF
+    source: tz
+    section: "7"
+    title: "Нагрузка 20 сессий / UI 2 с / VoIP 150 мс"
+    statement: "20 одновременных сессий; отклик UI ≤ 2 с до 100 пользователей; задержка голоса ≤ 150 мс; восстановление сессии после сбоя сети до 30 с."
+    priority: must
+    status: gap
+    evidence: "Требования не подтверждены тестами. Redis TTL 6 ч есть; VoIP нет."
+    code:
+      - docker-compose.yml
+      - services/api/app/session_store.py
+
+  - id: TZ-NFR-STACK
+    source: tz
+    section: "9"
+    title: "Стек: PostgreSQL, браузеры, Windows/Ubuntu"
+    statement: "PostgreSQL ≥ 12; Chrome/Firefox/Яндекс.Браузер; Windows 10/11 и Ubuntu 20.04+; SIP-сервер в контуре."
+    priority: must
+    status: partial
+    evidence: "Postgres 16, веб на Node — да. SIP — нет. Windows как целевой АРМ не описан (сервер — Ubuntu/Docker)."
+    code:
+      - docker-compose.yml
+
+  - id: TZ-OPT-01
+    source: tz
+    section: "6"
+    title: "Расширенная аналитика"
+    statement: "Графики, тепловые карты ошибок."
+    priority: optional
+    status: partial
+    evidence: "Есть heatmap чек-листа и KPI в /analytics, часть данных синтетическая."
+    code:
+      - web/app/analytics/page.jsx
+
+  - id: TZ-OPT-02
+    source: tz
+    section: "6"
+    title: "Экспорт Excel/PDF"
+    statement: "Выгрузка отчётов в Excel и PDF."
+    priority: optional
+    status: partial
+    evidence: "PDF протокола вызова есть. Excel нет. Формы 1/2 — API без UI."
+    code:
+      - services/api/app/report_pdf.py
+      - services/api/app/routes_v2.py
+
+  - id: TZ-OPT-03
+    source: tz
+    section: "6"
+    title: "Пакетный импорт материалов"
+    statement: "Ручной инструмент пакетного обновления сценариев и материалов."
+    priority: optional
+    status: partial
+    evidence: "Сценарии подхватываются из content/scenarios при старте API. Отдельного импортёра нет."
+    code:
+      - services/api/app/main.py
+
+  - id: TZ-OPT-04
+    source: tz
+    section: "6, 15"
+    title: "Адаптивный веб, мобильные в LAN"
+    statement: "Работа с мобильных устройств в локальной сети учебного центра."
+    priority: optional
+    status: gap
+    evidence: "Десктопный UI, отдельной мобильной вёрстки нет."
+    code:
+      - web/app/globals.css
+
+  - id: TZ-OPT-05
+    source: tz
+    section: "6"
+    title: "Внутренний API для модулей"
+    statement: "REST API для расширения функционала без внешних систем."
+    priority: optional
+    status: covered
+    evidence: "FastAPI /api и /api/v2."
+    code:
+      - services/api/app/main.py
+      - services/api/app/routes_v2.py
+
+  - id: TZ-UX-01
+    source: tz
+    section: "8, 15"
+    title: "Русский UI, визуальный стандарт 112"
+    statement: "Русский язык, единая стилистика, близость к визуальным стандартам ГБУ «Система 112»."
+    priority: must
+    status: partial
+    evidence: "Интерфейс на русском. Внешний вид свой, не ПОВ-112."
+    code:
+      - web/app/page.jsx
+
+  - id: TZ-DELIV-01
+    source: tz
+    section: "13–18"
+    title: "Сдача: код, презентация, прототип, документация"
+    statement: "Открытый код без обфускации; pptx/pdf; прототип; описание архитектуры и установки; 149-ФЗ / 152-ФЗ."
+    priority: should
+    status: partial
+    evidence: "Репозиторий, README, RAZVERTYVANIE.md, работающий стенд. Презентации и юр.пакета 152-ФЗ нет."
+    code:
+      - README.md
+      - RAZVERTYVANIE.md
+
+  # ---- домен памятки АРМ-112 ----
+  - id: ARM-ARCH-01
+    source: arm
+    section: "стр. 3–5"
+    title: "Цепочка: оператор-112 → КП → ДДС → ОКр"
+    statement: "Заявитель говорит с оператором-112; ДДС получает карточку и пишет реагирование; ОКр контролирует."
+    priority: must
+    status: gap
+    evidence: "Реализована только левая половина (опрос оператора-112). Рабочего места ДДС и ОКр нет."
+    code:
+      - web/app/trainee/page.jsx
+
+  - id: ARM-ARCH-02
+    source: arm
+    section: "стр. 5–7"
+    title: "Пять способов взаимодействия и ВИС"
+    statement: "Интеграция ИС, АРМ-112, телефон, посредник, комбинация; карточки приходят и из ВИС (101–104, ЭРА-ГЛОНАСС, 112 МО/КО)."
+    priority: should
+    status: gap
+    evidence: "Канал era_glonass есть в YAML УЧОЛ как тип обращения. Потока «карточка из ВИС» нет."
+    code:
+      - config/ukio.yaml
+
+  - id: ARM-ROLE-01
+    source: arm
+    section: "стр. 3, 14–16, 27"
+    title: "Роли специалиста-112 и главного специалиста"
+    statement: "Специалист-112 создаёт КП; главный специалист ставит «Проверена»."
+    priority: should
+    status: partial
+    evidence: "Опрос и сохранение полей — да, в учебной модели. Статуса «Проверена» и роли главного специалиста нет."
+    code:
+      - web/app/trainee/page.jsx
+      - db/003_ukio.sql
+
+  - id: ARM-ROLE-02
+    source: arm
+    section: "стр. 21–26"
+    title: "Роль диспетчера ДДС на АРМ-112"
+    statement: "Диспетчер видит КП своей службы, ставит статусы через «карандаш» в своём блоке, пишет комментарии."
+    priority: must
+    status: gap
+    evidence: "Нет экрана ДДС. Кнопка «Направить карточку» — действие оператора-112, не ДДС."
+    code:
+      - web/app/trainee/page.jsx
+
+  - id: ARM-ROLE-03
+    source: arm
+    section: "стр. 26–31"
+    title: "Контур ОКр"
+    statement: "Мониторинг «Не оповещено / Отказ / Не завершено», звонки, методика; красная индикация проблемных КП."
+    priority: should
+    status: gap
+    evidence: "Нет спецраздела контролёра и эскалации."
+    code: []
+
+  - id: ARM-CARD-01
+    source: arm
+    section: "стр. 14–20"
+    title: "Структура КП ПОВ-112"
+    statement: "Адрес, признаки, опросная карта, описание, итоговый тип, список оповещения, блоки служб."
+    priority: must
+    status: partial
+    evidence: "v2 УКИО в /assistant покрывает поля ПП 1931, не раскладку ПОВ-112. /trainee — ~15 полей."
+    code:
+      - config/ukio.yaml
+      - web/app/assistant/page.jsx
+      - web/app/trainee/page.jsx
+
+  - id: ARM-CARD-02
+    source: arm
+    section: "стр. 14–16, 18–20"
+    title: "Различие КП от 112 и КП из ВИС"
+    statement: "ВИС-карточки без номера РМ, часто без признаков и опросной карты; пострадавшие только в описании."
+    priority: should
+    status: gap
+    evidence: "Один шаблон карточки на все сценарии."
+    code:
+      - content/scenarios/
+
+  - id: ARM-EKP-01
+    source: arm
+    section: "стр. 7–8"
+    title: "ЕКП → итоговый тип → список оповещения"
+    statement: "Комбинация признаков даёт итоговый тип; тип даёт набор служб. Соответствие типов S112 и ИС службы не дословное."
+    priority: must
+    status: gap
+    evidence: "tip_proisshestviya.yaml — заглушка по форме 2/112, не ЕКП Москвы. xlsx классификатора не подключён."
+    code:
+      - config/classifiers/tip_proisshestviya.yaml
+
+  - id: ARM-EKP-02
+    source: arm
+    section: "стр. 14–15"
+    title: "Службу можно добавить, нельзя удалить"
+    statement: "Оператор-112 вручную добавляет службу в нетиповой ситуации; удаление из списка оповещения запрещено."
+    priority: should
+    status: gap
+    evidence: "Маршрутизация — фиксированные службы сценария 01–05."
+    code:
+      - web/app/trainee/page.jsx
+      - content/scenarios/
+
+  - id: ARM-STATE-CARD-01
+    source: arm
+    section: "стр. 27–28"
+    title: "Статусы карточки ПОВ-112"
+    statement: "Зарегистрирована, Отработана, Проверена, Не оповещено, Отказ, Не завершено, Завершена."
+    priority: must
+    status: gap
+    evidence: "db/003_ukio.sql: sozdana/naznachena/obrabatyvaetsya/reagirovanie/zavershena/zakryta/otmenena — другая машина состояний, в trainee не используется."
+    code:
+      - db/003_ukio.sql
+
+  - id: ARM-STATE-DDS-01
+    source: arm
+    section: "стр. 21–25"
+    title: "Последовательные статусы реагирования ДДС"
+    statement: "Добавлена → Получена → Принята|Не принята → Начало реагирования → Прибытие → Проведение работ → Работы завершены|Отказ от выполнения работ."
+    priority: must
+    status: gap
+    evidence: "sostoyanie_reagirovaniya.yaml: nachalo/obrabatyvaetsya/reagirovanie/zavershena/otmenena. Не совпадает с ПОВ-112."
+    code:
+      - config/classifiers/sostoyanie_reagirovaniya.yaml
+      - db/003_ukio.sql
+
+  - id: ARM-SLA-01
+    source: arm
+    section: "стр. 5, 21–22"
+    title: "SLA 30 секунд на Принята/Не принята"
+    statement: "Иначе карточка → «Не оповещено» и контроль ОКр."
+    priority: must
+    status: partial
+    evidence: "Число 30 с в normativy.yaml есть. Нет таймера ДДС и автоперехода в «Не оповещено»."
+    code:
+      - config/normativy.yaml
+
+  - id: ARM-SLA-02
+    source: arm
+    section: "стр. 27"
+    title: "Таймаут 48 часов → Не завершено"
+    statement: "Если с сохранения прошло > 48 ч и нет «Работы завершены» у службы."
+    priority: should
+    status: gap
+    evidence: "Нет."
+    code: []
+
+  - id: ARM-ACT-01
+    source: arm
+    section: "стр. 25–26, 28–31"
+    title: "Комментарий обязателен при отказе"
+    statement: "«Не принята» и «Отказ от выполнения работ» без комментария — нарушение; указывать кому передано, дубль, номер КП."
+    priority: must
+    status: gap
+    evidence: "Нет статусов отказа ДДС и обязательного комментария."
+    code: []
+
+  - id: ARM-ACT-02
+    source: arm
+    section: "стр. 32"
+    title: "Изменение ситуации — звонок на 112"
+    statement: "Нужны другие службы: позвонить на 112, представиться, назвать адрес и КП."
+    priority: should
+    status: gap
+    evidence: "Нет учебной процедуры эскалации с АРМ ДДС на 112."
+    code: []
+
+  - id: ARM-ERR-01
+    source: arm
+    section: "стр. 28–31"
+    title: "Типовые ошибки ОКр как учебные кейсы"
+    statement: "Ложная «Принята», профильный отказ, пустой комментарий, нет хода работ, нет связи с АРМ — разбор в тренажёре."
+    priority: should
+    status: gap
+    evidence: "Сценарии — пожар/ДТП/СМП для оператора-112, не кейсы нарушений ДДС."
+    code:
+      - content/scenarios/
+
+  - id: ARM-UI-01
+    source: arm
+    section: "стр. 11–13, 35–39"
+    title: "Эмуляция UI ПОВ-112"
+    statement: "Лента КП, автообновление, поиск, расширенный поиск, блоки служб, карандаш, карта адреса."
+    priority: must
+    status: gap
+    evidence: "Свой интерфейс тренажёра. Поиск ПОВ-112 не воспроизведён."
+    code:
+      - web/app/page.jsx
+
+  - id: ARM-ESC-01
+    source: arm
+    section: "стр. 32–34"
+    title: "Эскалация СТП / ОКр / МосЭДО"
+    statement: "Техсбой — СТП+ОКр; оперативка текущих суток — ОКр; учётки — МосЭДО."
+    priority: optional
+    status: gap
+    evidence: "Нет."
+    code: []
