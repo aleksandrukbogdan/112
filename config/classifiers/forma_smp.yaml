@@ -1,4 +1,0 @@
-istochnik: "Приказ Минздрава 388н"
-items:
-  - {kod: ekstrennaya,  nazvanie: "Экстренная (угроза жизни)", punkt: "11"}
-  - {kod: neotlozhnaya, nazvanie: "Неотложная",                punkt: "13"}

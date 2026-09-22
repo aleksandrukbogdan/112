@@ -1,142 +1,107 @@
-# Тренажёр оператора 112 — частые команды
 SHELL := /bin/bash
+-include .env
+PORT ?= 8080
+IP = $$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src") print $$(i+1)}' | head -1)
+DC = docker compose --profile gpu --profile llm
 
-.PHONY: test-v2 config-check config-reload help up up-speech down logs ps health test smoke seed reset psql prewarm pdf ports tunnel open close status
+.PHONY: help up up-cpu up-llm down restart logs ps health test tunnel open close passwords backup save gpu-check
 
 help:
-	@echo "  make test-v2     — приёмочный тест (50 проверок, без docker)"
-	@echo "  make config-check — проверить config/ до запуска"
-	@echo "  make config-reload — перечитать YAML без перезапуска"
-	@echo "  make ports       — проверить, свободны ли порты"
-	@echo "  make tunnel      — доступ с другого ПК через SSH (микрофон работает)"
-	@echo "  make open        — открыть порты в локальную сеть (микрофон НЕ работает)"
-	@echo "  make close       — вернуть порты на 127.0.0.1"
-	@echo "  make status      — что сейчас слушает и по какому адресу открывать"
-	@echo "  make up          — поднять текстовый режим (postgres, api, web)"
-	@echo "  make up-speech   — то же + распознавание и синтез речи"
-	@echo "  make down        — остановить"
-	@echo "  make reset       — остановить и УДАЛИТЬ данные БД"
-	@echo "  make health      — проверить состояние всех сервисов"
-	@echo "  make test        — офлайн-тесты логики (без Docker)"
-	@echo "  make smoke       — сквозной прогон вызова через API"
-	@echo "  make seed        — наполнить аналитику синтетическими вызовами"
-	@echo "  make prewarm     — предсинтез голосового банка (нужен профиль speech)"
-	@echo "  make pdf         — скачать протокол последнего вызова"
-	@echo "  make logs        — логи всех сервисов"
-	@echo "  make psql        — консоль Postgres"
+	@echo ""
+	@echo "  make up         — ВСЁ: БД, приложение, голос, GigaAM на GPU   (рекомендуется)"
+	@echo "  make up-cpu     — без видеокарты: распознаёт Vosk"
+	@echo "  make up-llm     — как up + модель в контейнере vLLM (если её нет на хосте)"
+	@echo "  make gpu-check  — видит ли Docker видеокарты"
+	@echo "  make health     — состояние всех компонентов"
+	@echo "  make passwords  — учётные записи первого запуска"
+	@echo "  make tunnel     — команда для входа с вашего ПК"
+	@echo "  make open/close — открыть/закрыть порт в сеть"
+	@echo "  make backup     — резервная копия базы"
+	@echo "  make save       — упаковать образы для машины без интернета"
+	@echo "  make test       — приёмочные тесты без docker"
+	@echo "  make logs / ps / restart / down"
+	@echo ""
 
-API_PORT ?= $(shell grep -E '^API_PORT=' .env 2>/dev/null | cut -d= -f2)
-API_PORT := $(or $(API_PORT),21121)
-API := http://localhost:$(API_PORT)
+_prep:
+	@[ -f .env ] || cp .env.example .env
+	@mkdir -p state/pg state/app state/hf
 
-ports:
-	@bash scripts/check_ports.sh
+up: _prep gpu-check
+	docker compose --profile gpu up -d --build
+	@echo "Первый запуск: сборка образов и загрузка моделей — 10–20 минут."
+	@$(MAKE) --no-print-directory _wait
 
-test-v2:
-	@python3 scripts/test_v2.py
+up-cpu: _prep
+	ASR_ENGINE=vosk docker compose up -d --build
+	@$(MAKE) --no-print-directory _wait
 
-config-check:
-	@python3 scripts/check_config.py
+up-llm: _prep gpu-check
+	LLM_BASE_URL=http://llm:8000/v1 docker compose --profile gpu --profile llm up -d --build
+	@echo "Модель скачивается и загружается в видеопамять — до 20–40 минут в первый раз."
+	@$(MAKE) --no-print-directory _wait
 
-config-reload:
-	@curl -s -X POST http://localhost:$(API_PORT)/api/v2/config/reload | python3 -m json.tool
+_wait:
+	@echo "Ждём готовности…"; for i in $$(seq 1 180); do \
+	  curl -fsS http://127.0.0.1:$(PORT)/health >/dev/null 2>&1 && break; sleep 2; done
+	@$(MAKE) --no-print-directory health passwords tunnel
 
-open:
-	@bash scripts/expose.sh open
-
-close:
-	@bash scripts/expose.sh close
-
-status:
-	@BIND=$$(grep -E '^BIND_HOST=' .env 2>/dev/null | cut -d= -f2); BIND=$${BIND:-127.0.0.1}; \
-	WEB=$$(grep -E '^WEB_PORT=' .env 2>/dev/null | cut -d= -f2); WEB=$${WEB:-21120}; \
-	URL=$$(grep -E '^NEXT_PUBLIC_API_URL=' .env 2>/dev/null | cut -d= -f2-); \
-	echo; \
-	echo "  BIND_HOST            $$BIND"; \
-	echo "  NEXT_PUBLIC_API_URL  $$URL"; \
-	echo; \
-	if [ "$$BIND" = "0.0.0.0" ]; then \
-	  IP=$$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src") print $$(i+1)}' | head -1); \
-	  echo "  Режим: открыт в сеть. Микрофон НЕ работает."; \
-	  echo "  Открывать:  http://$${IP:-АДРЕС}:$$WEB"; \
-	else \
-	  echo "  Режим: только localhost. Микрофон работает через туннель."; \
-	  echo "  С сервера:  http://localhost:$$WEB"; \
-	  echo "  С чужого ПК: make tunnel"; \
-	fi; \
-	echo; \
-	docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
-
-tunnel:
-	@WEB=$$(grep -E '^WEB_PORT=' .env 2>/dev/null | cut -d= -f2); WEB=$${WEB:-21120}; \
-	API=$$(grep -E '^API_PORT=' .env 2>/dev/null | cut -d= -f2); API=$${API:-21121}; \
-	IP=$$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src") print $$(i+1)}' | head -1); \
-	[ -z "$$IP" ] && IP=$$(hostname -I 2>/dev/null | awk '{print $$1}'); \
-	echo ""; \
-	echo "Выполните ЭТУ команду на своём компьютере (не на сервере):"; \
-	echo ""; \
-	echo "    ssh -N -L $$WEB:localhost:$$WEB -L $$API:localhost:$$API $${SUDO_USER:-$${USER:-ВАШ_ЛОГИН}}@$${IP:-АДРЕС_СЕРВЕРА}"; \
-	echo ""; \
-	if [ "$${SUDO_USER:-$$USER}" = "root" ]; then \
-	  echo "  Логин подставлен root. Во многих системах sshd запрещает вход"; \
-	  echo "  root по паролю (PermitRootLogin prohibit-password) — тогда нужен"; \
-	  echo "  ключ либо обычный пользователь вместо root."; \
-	fi; \
-	echo ""; \
-	echo "Затем откройте в браузере:  http://localhost:$$WEB"; \
-	echo ""; \
-	echo "Так работает микрофон: браузер считает localhost доверенным адресом."; \
-	echo "Ничего в .env менять не нужно."; \
-	echo ""
-
-up:
-	@bash scripts/check_ports.sh || (echo; echo "Поправьте порты в .env и повторите."; exit 1)
-	docker compose up -d --build postgres api web
-	@echo "Ждём готовности API…"
-	@for i in $$(seq 1 40); do \
-	  curl -fsS $(API)/health >/dev/null 2>&1 && break || sleep 2; \
-	done
-	@$(MAKE) --no-print-directory health
-
-up-speech:
-	docker compose --profile speech up -d --build
-	@echo "Первый старт ASR долгий: качаются веса GigaAM. Смотрите: make logs"
+gpu-check:
+	@command -v nvidia-smi >/dev/null || { echo "  nvidia-smi не найден. Без GPU: make up-cpu"; exit 1; }
+	@nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader | sed 's/^/  GPU /'
+	@docker run --rm --gpus all pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime nvidia-smi -L >/dev/null 2>&1 \
+	  && echo "  Docker видит GPU: да" \
+	  || { echo "  Docker НЕ видит GPU — NVIDIA Container Toolkit (INSTRUKCIYA.md, п. 8). Без GPU: make up-cpu"; exit 1; }
 
 down:
-	docker compose --profile speech down
+	$(DC) down
 
-reset:
-	docker compose --profile speech down -v
-	@echo "Тома удалены. Следующий 'make up' создаст БД заново и накатит db/*.sql"
+restart:
+	docker compose --profile gpu up -d --build --force-recreate
 
 logs:
-	docker compose logs -f --tail=80
+	$(DC) logs -f --tail=100
 
 ps:
-	docker compose ps
+	$(DC) ps
 
 health:
-	@curl -fsS $(API)/health | python3 -m json.tool || \
-	  echo "API не отвечает на $(API). Смотрите: docker compose logs api"
+	@curl -fsS http://127.0.0.1:$(PORT)/health | python3 -c "import json,sys; d=json.load(sys.stdin); \
+	print(''); print('  Приложение ..... работает'); \
+	print('  База ........... ' + d.get('db','?')); \
+	l=d['llm']; print('  Модель ......... ' + ('работает' if l.get('ok') else 'выключена' if l.get('ok') is None else 'НЕДОСТУПНА — ' + str(l.get('note') or l.get('error','')))); \
+	v=d['voice']; g=v.get('gigaam') or {}; \
+	print('  Распознавание .. ' + ('GigaAM на ' + str(g.get('device')) + ((' · ' + str(g.get('gpu'))) if g.get('gpu') else '') if v.get('engine')=='gigaam' else 'Vosk (CPU)' if v.get('engine')=='vosk' else 'не запущено')); \
+	print('  Синтез речи .... ' + ('Piper' if v.get('tts') else 'не запущен')); \
+	(v.get('note') and print('  Примечание ..... ' + v['note'])); \
+	s=d['svodka']; print('  Данные ......... классификатор v%s (%s поз.), %s вызовов, %s служб' % (s['klassifikator']['versiya'],s['klassifikator']['poziciy'],s['bilety']['vsego'],s.get('sluzhb'))); print('')" \
+	|| (echo "  Приложение не отвечает: make logs"; exit 1)
+
+passwords:
+	@docker logs t112 2>&1 | sed -n '/ПЕРВЫЙ ЗАПУСК/,/====/p' | head -9 || true
+
+tunnel:
+	@echo "  ─────────────────────────────────────────────────────────────"
+	@echo "  На СВОЁМ компьютере:"
+	@echo "    ssh -i ПУТЬ_К_КЛЮЧУ -N -L $(PORT):localhost:$(PORT) $${SUDO_USER:-$$USER}@$(IP)"
+	@echo "  и в браузере:  http://localhost:$(PORT)"
+	@echo "  ─────────────────────────────────────────────────────────────"
+
+open:
+	@sed -i 's/^BIND_HOST=.*/BIND_HOST=0.0.0.0/' .env
+	docker compose up -d --force-recreate app
+	@echo "  Открыто: http://$(IP):$(PORT)  (микрофон по http с чужого адреса не работает)"
+
+close:
+	@sed -i 's/^BIND_HOST=.*/BIND_HOST=127.0.0.1/' .env
+	docker compose up -d --force-recreate app
+
+backup:
+	@docker exec t112 python3 -c "from api import db; print(db.backup_now())"
+
+save:
+	docker save postgres:16-alpine t112-app t112-voice $$(docker image inspect t112-asr >/dev/null 2>&1 && echo t112-asr) -o t112-images.tar
+	@echo "  Готово: t112-images.tar"
 
 test:
-	python3 scripts/test_intents.py && python3 scripts/test_logic.py
-
-smoke:
-	python3 scripts/smoke_call.py
-
-seed:
-	python3 scripts/seed_analytics.py
-
-prewarm:
-	python3 scripts/prewarm_voicebank.py
-
-pdf:
-	@SID=$$(curl -fsS $(API)/api/analytics | \
-	  python3 -c "import sys,json; r=json.load(sys.stdin)['rows']; print(r[0]['session_id'] if r else '')"); \
-	if [ -z "$$SID" ]; then echo "Нет завершённых вызовов. Сначала: make smoke"; exit 1; fi; \
-	curl -fsS -o protokol.pdf "$(API)/api/sessions/$$SID/report.pdf" && \
-	echo "Сохранено: protokol.pdf (сессия $$SID)"
-
-psql:
-	docker compose exec postgres psql -U $${PG_USER:-t112} -d $${PG_DB:-trainer112}
+	@python3 scripts/test.py
+	@echo ""; echo "  Маршрутизация речи:"; python3 scripts/test_voice.py 2>&1 | grep -E '^[0-9 ]'

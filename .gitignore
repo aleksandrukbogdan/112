@@ -5,8 +5,13 @@ voicebank/*
 node_modules/
 .next/
 __pycache__/
+.ipynb_checkpoints/
+
 .env
 .env.bak
-venv_112/
-.ipynb_checkpoints/
+.env.bak.*
 112.txt
+
+state/
+voice/models/
+voice/*.zip
