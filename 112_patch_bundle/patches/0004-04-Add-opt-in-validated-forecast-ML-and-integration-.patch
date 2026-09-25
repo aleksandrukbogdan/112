@@ -1,0 +1,865 @@
+From 78b223b7b513d1569fb01305791b79a29d05ba6d Mon Sep 17 00:00:00 2001
+From: Patch author <patch@example.invalid>
+Date: Thu, 24 Sep 2026 01:17:04 -0500
+Subject: [PATCH 4/4] 04 Add opt-in validated forecast ML and integration
+ regression checks
+
+
+diff --git a/api/dds.py b/api/dds.py
+index 8eaa270..7239d49 100644
+--- a/api/dds.py
++++ b/api/dds.py
+@@ -424,7 +424,7 @@ def say(sid: str, cid: str, b: Say, u=Depends(current_user)):
+     c = next((x for x in s["zvonki"] if x["id"] == cid), None)
+     if not c or c["konec"] or c["ishod"] != "otvetil":
+         raise HTTPException(400, "звонок не активен")
+-    nar = D.proverit_rech(b.tekst)
++    nar = D.proverit_rech(b.tekst, s.get("_rules", {}).get("speech"))
+     if nar:
+         s["narusheniya_rechi"] += [{**n, "t": _now()} for n in nar]
+     c["dialog"].append({"kto": "dispetcher", "tekst": b.tekst, "t": _now()})
+diff --git a/api/domain.py b/api/domain.py
+index ee3f752..0b44cc6 100644
+--- a/api/domain.py
++++ b/api/domain.py
+@@ -70,11 +70,11 @@ def sravnit_adres(vvod: str, etalon: str) -> dict:
+ 
+ # ---------------------------------------------------------------- речь
+ 
+-def proverit_rech(tekst: str) -> list[dict]:
++def proverit_rech(tekst: str, rules=None) -> list[dict]:
+     """Нарушения правил речи по методике МЧС."""
+     low = norm_txt(tekst)
+     out = []
+-    for kod, rule in C.RECH.items():
++    for kod, rule in (C.RECH if rules is None else rules).items():
+         for obr in rule["obrazcy"]:
+             if norm_txt(obr) in low:
+                 out.append({
+@@ -106,7 +106,7 @@ _GRAM = [
+ ]
+ 
+ 
+-def proverit_grammatiku(tekst: str) -> list[dict]:
++def proverit_grammatiku(tekst: str, rules=None) -> list[dict]:
+     """
+     Проверка ручного ввода. Требование ТЗ: отчёт о занятии должен
+     содержать сведения о грамматике.
+@@ -114,7 +114,7 @@ def proverit_grammatiku(tekst: str) -> list[dict]:
+     out = []
+     t = (tekst or "")
+     low = t.lower().replace("ё", "е")
+-    for pat, opis in _GRAM:
++    for pat, opis in (_GRAM if rules is None else rules):
+         m = re.search(pat, low)
+         if m:
+             out.append({"fragment": m.group(0), "zamechanie": opis})
+@@ -167,7 +167,7 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
+     if verno_grp and bil.get("pr1_etalon"):
+         verno_grp = poz["pr1"] == bil["pr1_etalon"]
+     if bil.get("kod_etalon"):
+-        verno_grp = kod == bil["kod_etalon"]
++        verno_grp = bool(poz) and kod == bil["kod_etalon"]
+     f.append(Fakt("tip", "Тип происшествия выбран верно", verno_grp, 3,
+                   "Классификатор 0.46.24",
+                   {"vybrano": kod, "itog": poz["itog"] if poz else None,
+@@ -213,7 +213,7 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
+                   {"narusheniy": len(nar), "spisok": nar[:6]}))
+ 
+     # 8. грамматика
+-    gram = proverit_grammatiku(k.get("opisanie", ""))
++    gram = proverit_grammatiku(k.get("opisanie", ""), sess.get("_rules", {}).get("grammar"))
+     f.append(Fakt("grammatika", "Грамматика описания", not gram if k.get("opisanie", "").strip() else None, 1,
+                   "ТЗ ДГОЧСиПБ: отчёт должен содержать сведения о грамматике",
+                   {"zamechaniy": len(gram), "spisok": gram[:6]}))
+diff --git a/api/forecast_ml.py b/api/forecast_ml.py
+new file mode 100644
+index 0000000..e598484
+--- /dev/null
++++ b/api/forecast_ml.py
+@@ -0,0 +1,62 @@
++"""Optional CPU logistic model, JSON only; no pickle, model download or voice dependency.
++
++Default: off. A missing, malformed or unapproved model falls back to the heuristic.
++Features describe information available when a forecast is made, never the answer key.
++"""
++import hashlib
++import json
++import math
++import os
++from pathlib import Path
++
++SCHEMA="call-deadline-v1"
++FEATURES=["elapsed_ratio","filled_ratio","dialog_turns","difficulty","edits"]
++NEEDED=("adres_polny","opisanie","zayavitel_fio","zayavitel_telefon","tip_kod")
++
++def features(s,t,norm):
++    return [min(2,max(0,t/max(1,norm))),
++            sum(bool(str(s.get("kartochka",{}).get(k,"")).strip()) for k in NEEDED)/len(NEEDED),
++            min(1,sum(m.get("kto")=="operator" for m in s.get("dialog",[]))/10),
++            min(1,max(0,float(s.get("bilet",{}).get("slozhnost",1)))/5),
++            min(1,max(0,s.get("_field_edits",0))/30)]
++
++def sigmoid(z):
++    return 1/(1+math.exp(-max(-40,min(40,z))))
++
++def raw_logit(model,x):
++    return model["bias"]+sum(w*v for w,v in zip(model["weights"],x))
++
++def predict(model,x):
++    a,b=model.get("calibration",[1.,0.])
++    return sigmoid(a*raw_logit(model,x)+b)
++
++def load_model(path):
++    path=Path(path)
++    if path.stat().st_size>1_000_000: raise ValueError("Model file too large")
++    raw=path.read_bytes(); m=json.loads(raw)
++    if (m.get("schema")!=SCHEMA or m.get("features")!=FEATURES or
++        m.get("approved") is not True or m.get("eligible") is not True or
++        len(m.get("weights",[]))!=len(FEATURES) or len(m.get("calibration",[]))!=2):
++        raise ValueError("Unapproved or incompatible model")
++    numbers=m["weights"]+[m["bias"]]+m["calibration"]
++    if any(type(n) not in (int,float) or not math.isfinite(n) for n in numbers):
++        raise ValueError("Non-finite model parameters")
++    return m,hashlib.sha256(raw).hexdigest()
++
++def forecast(s,t,heuristic):
++    p=dict(heuristic)
++    x=features(s,t,p["proverka_na_sec"])
++    p.update(feature_schema=SCHEMA,features=x,feature_names=FEATURES,
++             ml_status="disabled",model_id="heuristic-v2")
++    if os.environ.get("ML_FORECAST_ENABLED","false").lower()!="true": return p
++    if t>=p["proverka_na_sec"]:
++        p.update(veroyatnost=0.,ml_status="deadline_elapsed")
++        return p
++    try:
++        model,key=load_model(os.environ.get("ML_FORECAST_MODEL","/app/state/ml/call-model.json"))
++        p.update(veroyatnost=round(predict(model,x),6),method="logistic-calibrated-v1",
++                 model_id=key,ml_status="active",calibrated=True,
++                 label="ML-прогноз срока отправки; не оценка правильности и не допуск")
++    except (OSError,ValueError,TypeError,KeyError,OverflowError):
++        p["ml_status"]="fallback_missing_invalid_or_unapproved"
++    return p
+diff --git a/api/main.py b/api/main.py
+index c687b07..32dbc28 100644
+--- a/api/main.py
++++ b/api/main.py
+@@ -28,6 +28,7 @@ from .auth import current_user, role
+ from . import quality as Q
+ from . import session_store as store
+ from . import insights
++from . import forecast_ml
+ 
+ VOICE_URL = os.environ.get("VOICE_URL", "http://voice:8090")      # Vosk (запасной ASR) + Piper (TTS)
+ ASR_URL = os.environ.get("ASR_URL", "http://asr:8091")            # GigaAM на GPU — основной ASR
+@@ -418,8 +419,11 @@ def assignments(u=Depends(current_user)):
+             r["scenario"] = Q.public_scenario(r["scenario"])
+         if u["role"] == "trainee":
+             r["vypolneno"] = db.q1(
+-                "SELECT ball, override_ball FROM sessions WHERE user_id=? AND assignment_id=? "
++                "SELECT id,itog,ball,override_ball FROM sessions WHERE user_id=? AND assignment_id=? "
+                 "AND state='done' ORDER BY finished DESC LIMIT 1", (u["id"], r["id"]))
++            if r["vypolneno"]:
++                r["vypolneno"]["passed"] = insights.effective(r["vypolneno"]).get("passed")
++                r["vypolneno"].pop("itog", None)
+     return rows
+ 
+ 
+@@ -512,7 +516,7 @@ async def replika(sid: str, b: Replika, u=Depends(current_user)):
+     original = _live(sid, u)
+     s = copy.deepcopy(original)
+     t_ms = int((time.time() - s["nachalo"]) * 1000)
+-    nar = D.proverit_rech(b.tekst)
++    nar = D.proverit_rech(b.tekst, s.get("_rules", {}).get("speech"))
+     if nar:
+         s["narusheniya_rechi"].extend([{**n, "t_ms": t_ms} for n in nar])
+     s["dialog"].append({"kto": "operator", "tekst": b.tekst, "t_ms": t_ms})
+@@ -581,7 +585,8 @@ def pole(sid: str, b: Pole, u=Depends(current_user)):
+ @store.command(LIVE)
+ def prognoz(sid: str, u=Depends(current_user)):
+     s = _live(sid, u)
+-    p = D.prognoz_v_vyzove(s, time.time() - s["nachalo"])
++    t = time.time() - s["nachalo"]
++    p = forecast_ml.forecast(s, t, D.prognoz_v_vyzove(s, t))
+     p["id"] = db.ex("INSERT INTO forecasts(kind,subject,created,data) VALUES(?,?,?,?)",
+                     ("call", sid, time.time(), json.dumps(p)))
+     return p
+diff --git a/api/quality.py b/api/quality.py
+index af8cdce..fa7bf86 100644
+--- a/api/quality.py
++++ b/api/quality.py
+@@ -97,7 +97,8 @@ def public_scenario(data):
+ 
+ def validate_card(card):
+     from fastapi import HTTPException
+-    texts = {"adres_polny", "opisanie", "zayavitel_fio", "zayavitel_telefon", "tip_kod"}
++    # tip_itog is the existing UI's display label; never used as grading evidence.
++    texts = {"adres_polny", "opisanie", "zayavitel_fio", "zayavitel_telefon", "tip_kod", "tip_itog"}
+     allowed = texts | {"postradavshie", "pravonarushenie", "sluzhby"}
+     for key, value in card.items():
+         if key not in allowed:
+diff --git a/api/session_store.py b/api/session_store.py
+index ace176a..8436e42 100644
+--- a/api/session_store.py
++++ b/api/session_store.py
+@@ -26,13 +26,15 @@ def content(kind, data):
+ def freeze(s):
+     if s.get("versions"):
+         return
++    from . import domain as D
++    rules = {"norm":C.NORM,"dds":C.DDS,"speech":C.RECH,"grammar":D._GRAM,"rubric":Q.RUBRIC_VERSION}
+     s["versions"] = {
+         "scenario": content("scenario",s["bilet"]),
+         "classifier": content("classifier",C.load("index")),
+-        "rules": content("rules",{"norm":C.NORM,"dds":C.DDS,"rubric":Q.RUBRIC_VERSION}),
++        "rules": content("rules",rules),
+         "rubric": Q.RUBRIC_VERSION,
+     }
+-    s["_rules"] = copy.deepcopy({"norm":C.NORM,"dds":C.DDS})
++    s["_rules"] = copy.deepcopy(rules)
+ 
+ def index(s):
+     key = s.get("versions",{}).get("classifier")
+@@ -58,6 +60,7 @@ def persist(s):
+     for key,value in s.get("kartochka",{}).items():
+         if not key.startswith("_") and value != old_card.get(key):
+             event(s,"field_changed",{"field":key,"before":old_card.get(key),"after":value})
++            s["_field_edits"] = s.get("_field_edits", 0) + 1
+     for key in ("dialog","statusy","zamechaniya"):
+         for item in s.get(key,[])[len(previous.get(key,[])):]:
+             event(s,key,item)
+diff --git a/scripts/ml_export.py b/scripts/ml_export.py
+new file mode 100644
+index 0000000..cc9af86
+--- /dev/null
++++ b/scripts/ml_export.py
+@@ -0,0 +1,33 @@
++"""Export numeric snapshots from the configured DB. No mutation of attempt data.
++
++python -m scripts.ml_export /safe/path/dataset.json
++Run inside the app environment. Different exports use different pseudonyms.
++"""
++import argparse
++import hashlib
++import json
++import secrets
++from pathlib import Path
++from api import db
++from api.forecast_ml import SCHEMA
++
++def export_rows():
++    salt=secrets.token_bytes(32); selected={}
++    for row in db.q("SELECT f.*,s.user_id,s.kind session_kind FROM forecasts f JOIN sessions s ON s.id=f.subject "
++                    "WHERE f.kind='call' AND f.fakt IS NOT NULL AND s.state='done' ORDER BY f.created,f.id"):
++        if row["subject"] in selected or row["session_kind"]!="ops112": continue
++        p=json.loads(row["data"]);fact=json.loads(row["fakt"])
++        if p.get("feature_schema")!=SCHEMA or p["t_prognoza_sec"]>=p["proverka_na_sec"]: continue
++        learner=hashlib.sha256(salt+str(row["user_id"]).encode()).hexdigest()[:24]
++        attempt=hashlib.sha256(salt+row["subject"].encode()).hexdigest()[:24]
++        selected[row["subject"]]={"learner":learner,"attempt":attempt,"ts":row["created"],
++                                   "x":p["features"],"y":int(bool(fact["uspel"]))}
++    return {"schema":SCHEMA,"selection":"first_predeadline_per_attempt","rows":list(selected.values())}
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument("output",type=Path)
++    args=parser.parse_args();data=export_rows()
++    args.output.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
++    print(f"Exported {len(data['rows'])} attempts; pseudonymous data still needs access control.")
++
++if __name__=="__main__":main()
+diff --git a/scripts/ml_train.py b/scripts/ml_train.py
+new file mode 100644
+index 0000000..4058552
+--- /dev/null
++++ b/scripts/ml_train.py
+@@ -0,0 +1,99 @@
++"""python -m scripts.ml_train dataset.json model.json [--approve]
++
++Standard-library baseline. Strict chronological split + unseen learners in holdouts.
++If returning learners consume the holdout, collect a new cohort; never switch to a
++random row split. JSON contains no text, names, phone numbers or answer keys.
++"""
++import argparse
++import collections
++import hashlib
++import json
++import math
++import random
++from pathlib import Path
++from api.forecast_ml import FEATURES,SCHEMA,sigmoid,predict,raw_logit
++
++def split(rows):
++    rows=sorted(rows,key=lambda r:(r["ts"],r["attempt"]))
++    if len({r["attempt"] for r in rows})!=len(rows):
++        raise ValueError("Exactly one snapshot per attempt required")
++    if len(rows)<200: raise ValueError("Need at least 200 completed attempts")
++    t1,t2=rows[int(len(rows)*.6)]["ts"],rows[int(len(rows)*.8)]["ts"]
++    train=[r for r in rows if r["ts"]<t1]
++    seen={r["learner"] for r in train}
++    calibration=[r for r in rows if t1<=r["ts"]<t2 and r["learner"] not in seen]
++    seen|={r["learner"] for r in calibration}
++    test=[r for r in rows if r["ts"]>=t2 and r["learner"] not in seen]
++    for name,part in [("train",train),("calibration",calibration),("test",test)]:
++        if len(part)<30 or len({r["learner"] for r in part})<10 or {r["y"] for r in part}!={0,1}:
++            raise ValueError(f"Insufficient {name}: need 30 attempts, 10 distinct new learners and both outcomes")
++    return train,calibration,test
++
++def fit(rows,iterations=1000):
++    width=len(rows[0]["x"]); w=[0.]*width; b=0.
++    for _ in range(iterations):
++        dw=[0.]*width; db=0.
++        for row in rows:
++            error=sigmoid(b+sum(a*v for a,v in zip(w,row["x"])))-row["y"]
++            db+=error
++            for j,v in enumerate(row["x"]): dw[j]+=error*v
++        b-=.3*db/len(rows)
++        w=[a-.3*(d/len(rows)+.001*a) for a,d in zip(w,dw)]
++    return {"weights":w,"bias":b}
++
++def metrics(pairs):
++    n=len(pairs)
++    return {"n":n,"brier":sum((p-y)**2 for p,y in pairs)/n,
++            "log_loss":-sum(y*math.log(max(1e-9,p))+(1-y)*math.log(max(1e-9,1-p)) for p,y in pairs)/n,
++            "accuracy":sum((p>=.5)==bool(y) for p,y in pairs)/n}
++
++def bootstrap_delta(test,model,base):
++    groups=collections.defaultdict(list)
++    for r in test: groups[r["learner"]].append((predict(model,r["x"])-r["y"])**2-(base-r["y"])**2)
++    keys=sorted(groups); rnd=random.Random(112); differences=[]
++    for _ in range(500):
++        sample=[v for k in rnd.choices(keys,k=len(keys)) for v in groups[k]]
++        differences.append(sum(sample)/len(sample))
++    differences.sort()
++    return [differences[12],differences[487]]
++
++def train(data,approve=False):
++    if data.get("schema")!=SCHEMA: raise ValueError("Incompatible dataset schema")
++    rows=data["rows"]
++    for r in rows:
++        if (r["y"] not in (0,1) or len(r["x"])!=len(FEATURES) or
++            any(type(v) not in (int,float) or not math.isfinite(v) for v in r["x"]) or
++            not math.isfinite(r["ts"])): raise ValueError("Invalid row")
++    learning,calibration,test=split(rows)
++    model=fit(learning)
++    calibrator=fit([{**r,"x":[raw_logit(model,r["x"])]} for r in calibration])
++    model["calibration"]=[calibrator["weights"][0],calibrator["bias"]]
++    base=sum(r["y"] for r in learning)/len(learning)
++    actual=metrics([(predict(model,r["x"]),r["y"]) for r in test])
++    baseline=metrics([(base,r["y"]) for r in test])
++    delta=bootstrap_delta(test,model,base)
++    eligible=actual["brier"]<baseline["brier"] and delta[1]<0
++    model.update(schema=SCHEMA,features=FEATURES,algorithm="logistic-l2+platt-v1",
++                 eligible=eligible,approved=bool(approve and eligible),
++                 validation={"policy":"time_ordered_new_learners_60_20_20",
++                    "train":len(learning),"calibration":len(calibration),"test":len(test),
++                    "excluded":len(rows)-len(learning)-len(calibration)-len(test),
++                    "model":actual,"constant_train_baseline":baseline,"delta_brier_ci95":delta,
++                    "warning":"Exploratory bootstrap on one holdout. Repeated model selection needs a fresh test cohort."})
++    return model
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("dataset",type=Path);parser.add_argument("model",type=Path)
++    parser.add_argument("--approve",action="store_true",help="Manual approval, only if statistical gate passes")
++    args=parser.parse_args()
++    raw=args.dataset.read_bytes(); data=json.loads(raw)
++    model=train(data,args.approve)
++    model["dataset_sha256"]=hashlib.sha256(raw).hexdigest()
++    args.model.parent.mkdir(parents=True,exist_ok=True)
++    tmp=args.model.with_suffix(".tmp")
++    tmp.write_text(json.dumps(model,ensure_ascii=False,indent=2),encoding="utf-8")
++    tmp.replace(args.model)
++    print(json.dumps({"approved":model["approved"],"eligible":model["eligible"],"validation":model["validation"]},ensure_ascii=False,indent=2))
++
++if __name__=="__main__": main()
+diff --git a/scripts/verify_patch.py b/scripts/verify_patch.py
+new file mode 100644
+index 0000000..19c133c
+--- /dev/null
++++ b/scripts/verify_patch.py
+@@ -0,0 +1,78 @@
++"""Single verification entry point. An explicitly requested skipped suite is NOT success."""
++import argparse
++import ast
++import hashlib
++import json
++import os
++import re
++import shutil
++import subprocess
++import sys
++import unittest
++from pathlib import Path
++
++ROOT=Path(__file__).resolve().parents[1]
++
++def contracts(source):
++    hashes={}
++    for file,names in {"api/main.py":["v_asr","v_tts","voice_health"],
++                       "api/caller.py":None,"web/app.js":["toggleMic","send"],
++                       "web/dds.js":["micTo","speak","ddsPlay"]}.items():
++        text=source(file)
++        if names is None:hashes[file]=hashlib.sha256(text.encode()).hexdigest();continue
++        if file.endswith(".py"):
++            nodes={n.name:ast.dump(n,include_attributes=False) for n in ast.parse(text).body
++                   if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}
++        else:
++            starts=list(re.finditer(r"^(?:async )?function (\w+)\(",text,re.M))
++            nodes={m.group(1):text[m.start():starts[i+1].start() if i+1<len(starts) else len(text)].strip()
++                   for i,m in enumerate(starts)}
++        for name in names:
++            if name not in nodes:raise ValueError(f"Missing voice boundary {file}:{name}")
++            hashes[file+":"+name]=hashlib.sha256(nodes[name].encode()).hexdigest()
++    return hashes
++
++def run_suite(directory,pattern="test*.py",required=False):
++    suite=unittest.TestLoader().discover(str(ROOT/directory),pattern=pattern,top_level_dir=str(ROOT/directory))
++    result=unittest.TextTestRunner(verbosity=2).run(suite)
++    return result.wasSuccessful() and (not required or result.testsRun>0 and not result.skipped)
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--integration",action="store_true")
++    p.add_argument("--postgres",action="store_true")
++    p.add_argument("--skip-js",action="store_true",help="Explicitly omit Node checks, e.g. inside Python-only app image")
++    p.add_argument("--write-contract",metavar="GIT_REF",help="Maintainer only: record original voice boundaries")
++    args=p.parse_args()
++    if args.write_contract:
++        def read(file):return subprocess.check_output(["git","show",f"{args.write_contract}:{file}"],cwd=ROOT,text=True)
++        (ROOT/"tests/voice_contract.json").write_text(json.dumps(contracts(read),indent=2)+"\n")
++        return
++    os.chdir(ROOT);sys.path.insert(0,str(ROOT))
++    ok=run_suite("tests")
++    for folder in ("api","scripts","tests"):
++        for path in (ROOT/folder).rglob("*.py"):
++            try:ast.parse(path.read_text(encoding="utf-8"),filename=str(path))
++            except SyntaxError as e:print(e);ok=False
++    expected=json.loads((ROOT/"tests/voice_contract.json").read_text())
++    actual=contracts(lambda file:(ROOT/file).read_text())
++    changed=[k for k in expected if expected[k]!=actual.get(k)]
++    if changed:
++        print("Voice boundaries differ (may be colleague's intended changes; review manually):",changed)
++        ok=False
++    else:print("Voice boundary hashes: unchanged")
++    node=shutil.which("node") or os.environ.get("CODEX_PRIMARY_RUNTIME_NODE")
++    if args.skip_js:
++        print("JS checks intentionally omitted; run frontend_smoke.cjs and node --check on the workstation.")
++    elif node:
++        for file in ("app.js","dds.js","insights.js"):
++            if subprocess.run([node,"--check",str(ROOT/"web"/file)]).returncode:ok=False
++        if subprocess.run([node,str(ROOT/"tests/frontend_smoke.cjs")]).returncode:ok=False
++        print("JavaScript syntax check completed; this is NOT a browser test.")
++    else:print("JS SYNTAX NOT CHECKED: install Node.js on the test workstation");ok=False
++    if args.integration:ok=run_suite("tests/integration","test_api.py",required=True) and ok
++    if args.postgres:ok=run_suite("tests/integration","test_postgres.py",required=True) and ok
++    print("PASS (selected checks only)" if ok else "NOT ACCEPTED: failed or unavailable requested checks")
++    raise SystemExit(0 if ok else 1)
++
++if __name__=="__main__":main()
+diff --git a/tests/frontend_smoke.cjs b/tests/frontend_smoke.cjs
+new file mode 100644
+index 0000000..13fbf8a
+--- /dev/null
++++ b/tests/frontend_smoke.cjs
+@@ -0,0 +1,40 @@
++/* Template/logic smoke tests in a fake DOM. These are explicitly NOT browser E2E. */
++const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
++const root=path.resolve(__dirname,'..');
++function extract(file,name){
++  const text=fs.readFileSync(path.join(root,file),'utf8');
++  const starts=[...text.matchAll(/^(?:async )?function (\w+)\(/gm)];
++  const i=starts.findIndex(m=>m[1]===name);assert(i>=0,`Missing ${name}`);
++  return text.slice(starts[i].index,i+1<starts.length?starts[i+1].index:text.length);
++}
++function node(){return {innerHTML:'',textContent:'',value:'',querySelector:()=>node(),querySelectorAll:()=>[],scrollIntoView(){}};}
++const elements=new Map();
++const get=s=>{if(!elements.has(s))elements.set(s,node());return elements.get(s);};
++const ctx=vm.createContext({console,Date,Math,JSON,Number,String,Set,Map,
++  clearInterval(){},confirm:()=>true,document:{querySelectorAll:()=>[],getElementById:()=>node()},
++  $:get,esc:s=>String(s??'').replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])),
++  pct:n=>n==null?'—':Math.round(n*100)+'%',fmtT:()=>'',dl:s=>s,
++  modal:html=>get('#modalBox').innerHTML=html,closeModal(){},toast(message){throw new Error(message);},
++  S:{user:{role:'trainee'},cfg:{gruppy:{},dds:{podtverzhdenie_sec:30}},dialog:[]},
++  DS:{sid:'a',sluzhby:[]},POST_RU:{net:'нет'}});
++for(const name of ['factsHtml','detali'])vm.runInContext(extract('web/app.js',name),ctx);
++for(const name of ['viewDdsList','ddsFinish'])vm.runInContext(extract('web/dds.js',name),ctx);
++vm.runInContext(fs.readFileSync(path.join(root,'web/insights.js'),'utf8'),ctx);
++
++(async()=>{
++  const fact={kod:'rech',nazvanie:'<script>alert(1)</script>',proyden:null,ves:1,istochnik:'test',detali:{}};
++  const html=ctx.factsHtml([fact]);assert(html.includes('не проверено'));assert(!html.includes('<script>'));
++  ctx.api=async()=>[{id:'a',nazvanie:'A',situaciya:'Scenario',adres_vidimy:'Address',slozhnost:1}];
++  await ctx.viewDdsList(node());assert(get('#ddsBody').innerHTML.includes('Указан в карточке'));
++  ctx.api=async()=>({ball:74,passed:false,verdikt:'не зачтено',fakty:[fact],session_id:'a',t_podtverzhdeniya:1});
++  await ctx.ddsFinish();assert(get('#view').innerHTML.includes('не зачтено'));
++  assert(get('#view').innerHTML.includes('</div></div>'));assert(!get('#view').innerHTML.includes('}/div>'));
++  const target=node();
++  ctx.api=async()=>({n:0,passed:0,legacy_excluded:0,bkt_note:'baseline',skills:[{name:'Адрес',n:0}],plan:[],
++    forecasts:{n:0,brier:null,accuracy:null,calibration:[],warning:'small sample'},attempts:[]});
++  await ctx.viewInsights(target);assert(target.innerHTML.includes('не проверен'));assert(!target.textContent.startsWith('Ошибка'));
++  ctx.api=async()=>({session:{scenario_id:'a',started:1},itog:{ball:0,verdikt:'не зачтено',fakty:[fact]},
++    events:[{seq:1,event_id:'a',ts:2,type:'dialog',payload:{text:'<img src=x onerror=alert(1)>'}}],dialog:[]});
++  await ctx.detailedRazbor('a');assert(!get('#modalBox').innerHTML.includes('<img src=x'));
++  console.log('Frontend smoke: 5 scenarios passed (fake DOM, no audio/browser)');
++})().catch(e=>{console.error(e);process.exitCode=1;});
+diff --git a/tests/integration/test_api.py b/tests/integration/test_api.py
+new file mode 100644
+index 0000000..522310f
+--- /dev/null
++++ b/tests/integration/test_api.py
+@@ -0,0 +1,138 @@
++"""Integration tests. Always use a fresh temporary SQLite DB, never production state."""
++import copy
++import importlib.util
++import json
++import os
++import secrets
++import tempfile
++import time
++import unittest
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++from unittest.mock import patch
++
++class APITests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        missing=[m for m in ("fastapi","httpx","pydantic","multipart","openpyxl","reportlab") if importlib.util.find_spec(m) is None]
++        if missing: raise unittest.SkipTest("Missing application dependencies: "+", ".join(missing))
++        cls.tmp=tempfile.TemporaryDirectory()
++        root=Path(__file__).resolve().parents[2]
++        cls.env=patch.dict(os.environ,{"DATABASE_URL":"","DATA_DIR":str(root/"data"),
++            "DB_PATH":cls.tmp.name+"/api.db","BACKUP_DIR":cls.tmp.name+"/backup",
++            "SECRET_KEY":secrets.token_hex(32),"LLM_ENABLED":"false","ML_FORECAST_ENABLED":"false"})
++        cls.env.start()
++        from fastapi.testclient import TestClient
++        from api import main,db,auth,config as C
++        cls.main,cls.db,cls.auth,cls.C=main,db,auth,C
++        if db._conn:db._conn.close()
++        db._conn=None;db.PG=False
++        db.DB_PATH=Path(cls.tmp.name)/"api.db";db.BACKUP_DIR=Path(cls.tmp.name)/"backup"
++        C.DATA=root/"data";C.LLM_ON=False
++        db.conn()
++        for uid,role in [(1,"trainee"),(2,"trainee"),(3,"teacher"),(4,"admin")]:
++            db.ex("INSERT INTO users(id,login,name,role,pw_hash,group_id) VALUES(?,?,?,?,?,?)",
++                  (uid,"test"+str(uid),"Test user",role,"not-a-real-password",1))
++        cls.bg=patch.object(db,"start_backup_thread");cls.bg.start()
++        cls.client=TestClient(main.app);cls.client.__enter__()
++        cls.sc=copy.deepcopy(C.load("bilety")[0]);cls.sc["id"]="patch-test-scenario"
++        cls.code=next(k for k,v in C.load("index").items() if v["g"]==cls.sc["gruppa"])
++        cls.sc["kod_etalon"]=cls.code;cls.sc.pop("pr1_etalon",None)
++        db.ex("INSERT INTO scenarios(id,source,status,data) VALUES(?,?,?,?)",
++              (cls.sc["id"],"test","published",json.dumps(cls.sc)))
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.client.__exit__(None,None,None);cls.bg.stop()
++        cls.db._conn.close();cls.db._conn=None
++        cls.env.stop();cls.tmp.cleanup()
++
++    def request(self,method,path,body=None,uid=1):
++        kw={"headers":{"Authorization":"Bearer "+self.auth.make_token(uid)}}
++        if body is not None:kw["json"]=body
++        return self.client.request(method,path,**kw)
++
++    def start(self):
++        r=self.request("POST","/api/session",{"scenario_id":self.sc["id"]})
++        self.assertEqual(r.status_code,200,r.text)
++        return r.json()["session_id"]
++
++    def card(self):
++        from api.quality import routes
++        c={"adres_polny":self.sc["adres_etalon"],"opisanie":"Произошло учебное событие по адресу",
++           "zayavitel_fio":"Тест","zayavitel_telefon":"79991112233","tip_kod":self.code,"tip_itog":"UI display label",
++           "postradavshie":"net","pravonarushenie":False}
++        c["sluzhby"]=routes(self.C.load("index")[self.code],c)
++        return c
++
++    def test_no_live_answers_and_foreign_access(self):
++        sid=self.start()
++        self.assertEqual(self.request("GET",f"/api/session/{sid}/razbor").status_code,409)
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/otpravit",{},uid=2).status_code,403)
++        for sc in self.request("GET","/api/scenarios").json():
++            self.assertFalse({"adres_etalon","kod_etalon","zayavitel","podskazki"}&set(sc))
++
++    def test_critical_wrong_address(self):
++        sid=self.start();card=self.card();card["adres_polny"]="Чужая улица, дом 9999"
++        r=self.request("POST",f"/api/session/{sid}/otpravit",{"kartochka":card})
++        self.assertEqual(r.status_code,200,r.text)
++        self.assertFalse(r.json()["passed"]);self.assertIn("adres",r.json()["critical_errors"])
++
++    def test_parallel_completion_exactly_once(self):
++        sid=self.start();body={"kartochka":self.card()}
++        with ThreadPoolExecutor(max_workers=4) as pool:
++            responses=list(pool.map(lambda _:self.request("POST",f"/api/session/{sid}/otpravit",body),range(4)))
++        self.assertTrue(all(r.status_code==200 for r in responses),[r.text for r in responses])
++        self.assertTrue(all(r.json()==responses[0].json() for r in responses))
++        self.assertEqual(self.db.q1("SELECT COUNT(*) n FROM completion_receipts WHERE session_id=?",(sid,))["n"],1)
++        self.assertEqual(self.db.q1("SELECT COUNT(*) n FROM session_events WHERE session_id=? AND type='session_completed'",(sid,))["n"],1)
++        self.main.reload_live()
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/otpravit",body).json(),responses[0].json())
++
++    def test_dds_accept_only_and_hidden_card(self):
++        r=self.request("POST","/api/dds/session",{"scenario_id":self.sc["id"]})
++        self.assertEqual(r.status_code,200,r.text)
++        sid=r.json()["session_id"]
++        self.assertNotIn("_pravda",r.json()["kartochka"])
++        self.assertNotIn("_oshibka",r.json()["kartochka"])
++        self.request("POST",f"/api/dds/{sid}/status",{"status":"prinyata"})
++        r=self.request("POST",f"/api/dds/{sid}/finish",{})
++        self.assertEqual(r.status_code,200,r.text)
++        self.assertFalse(r.json()["passed"])
++        self.assertIn("peredacha",r.json()["critical_errors"])
++        self.assertEqual(self.request("POST",f"/api/dds/{sid}/finish",{}).json(),r.json())
++
++    def test_review_permissions_and_immutable_original(self):
++        sid=self.start();card=self.card();card["adres_polny"]="неверный адрес"
++        original=self.request("POST",f"/api/session/{sid}/otpravit",{"kartochka":card}).json()
++        body={"changes":{"adres":True},"reason":"Проверено преподавателем на учебном примере"}
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/review",body).status_code,403)
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/review",body,uid=4).status_code,403)
++        r=self.request("POST",f"/api/session/{sid}/review",body,uid=3)
++        self.assertEqual(r.status_code,200,r.text)
++        after=self.request("GET",f"/api/session/{sid}/razbor").json()
++        self.assertEqual(after["original_itog"],original)
++        self.assertTrue(next(f for f in after["itog"]["fakty"] if f["kod"]=="adres")["proyden"])
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/otpravit",{}).json(),original)
++
++    def test_invalid_fields_and_assignment(self):
++        sid=self.start()
++        self.assertEqual(self.request("POST",f"/api/session/{sid}/pole",{"key":"_pravda","value":"x"}).status_code,422)
++        self.assertEqual(self.request("POST","/api/session",{"scenario_id":self.sc["id"],"assignment_id":999999}).status_code,403)
++
++    def test_frozen_rules(self):
++        sid=self.start()
++        old=self.main.LIVE[sid]["_rules"]["norm"]["kartochka_sec"]
++        with patch.dict(self.C.NORM,{"kartochka_sec":old+500}):
++            r=self.request("GET",f"/api/session/{sid}/prognoz")
++        self.assertEqual(r.json()["proverka_na_sec"],old)
++
++    def test_report_and_script_smoke(self):
++        sid=self.start();self.request("POST",f"/api/session/{sid}/otpravit",{"kartochka":self.card()})
++        token=self.auth.make_token(1)
++        r=self.client.get(f"/api/otchet/zanyatie/{sid}.pdf?token={token}")
++        self.assertEqual(r.status_code,200,r.text[:100] if r.status_code!=200 else "")
++        self.assertTrue(r.content.startswith(b"%PDF"))
++        self.assertEqual(self.client.get("/static/insights.js").status_code,200)
++
++if __name__=="__main__":unittest.main()
+diff --git a/tests/integration/test_postgres.py b/tests/integration/test_postgres.py
+new file mode 100644
+index 0000000..2abb9d5
+--- /dev/null
++++ b/tests/integration/test_postgres.py
+@@ -0,0 +1,49 @@
++"""Opt-in integration against PostgreSQL. Creates and drops ONLY its own random schema.
++
++RUN_POSTGRES_TESTS=1 TEST_DATABASE_URL=postgresql://... python -m unittest discover -s tests/integration -p test_postgres.py -v
++Prefer a disposable test database. Never provide a production superuser account.
++"""
++import os
++import unittest
++import uuid
++
++class PostgreSQLTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        if os.environ.get("RUN_POSTGRES_TESTS")!="1" or not os.environ.get("TEST_DATABASE_URL"):
++            raise unittest.SkipTest("PostgreSQL test DB not explicitly enabled")
++        import psycopg
++        from psycopg import sql
++        from psycopg.rows import dict_row
++        from api import db
++        cls.db=db;cls.sql=sql;cls.schema="t112_patch_test_"+uuid.uuid4().hex
++        cls.c=psycopg.connect(os.environ["TEST_DATABASE_URL"],row_factory=dict_row)
++        cls.c.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(cls.schema)))
++        cls.c.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(cls.schema)))
++        for statement in db._schema(True).split(";"):
++            if statement.strip():cls.c.execute(statement)
++        cls.c.commit()
++        db.PG=True;db._conn=cls.c;db.migrate(cls.c)
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.c.rollback()
++        cls.c.execute(cls.sql.SQL("DROP SCHEMA {} CASCADE").format(cls.sql.Identifier(cls.schema)))
++        cls.c.commit();cls.c.close();cls.db._conn=None;cls.db.PG=False
++
++    def test_transaction_and_returning_id(self):
++        db=self.db
++        with self.assertRaises(RuntimeError):
++            with db.tx():
++                db.ex("INSERT INTO groups(name) VALUES(?)",("rolled-back",))
++                db.set_setting("no",1)
++                raise RuntimeError("injected")
++        self.assertIsNone(db.q1("SELECT * FROM groups WHERE name=?",("rolled-back",)))
++        with db.tx():
++            identifier=db.ex("INSERT INTO groups(name) VALUES(?)",("committed",))
++            db.set_setting("yes",2)
++        self.assertIsInstance(identifier,int)
++        self.assertEqual(db.setting("yes"),2)
++        self.assertEqual(len(db.q("SELECT * FROM schema_migrations")),1)
++
++if __name__=="__main__":unittest.main()
+diff --git a/tests/test_dds_rules.py b/tests/test_dds_rules.py
+new file mode 100644
+index 0000000..02441fd
+--- /dev/null
++++ b/tests/test_dds_rules.py
+@@ -0,0 +1,41 @@
++"""Execute the real pure DDS evaluator AST without importing the FastAPI router.
++
++Not an API test: dependency injection, HTTP and voice are checked separately.
++"""
++import ast
++import copy
++import re
++import unittest
++from pathlib import Path
++from api import config as C, domain as D
++
++tree=ast.parse((Path(__file__).resolve().parents[1]/"api/dds.py").read_text())
++function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="ocenit")
++function.decorator_list=[]
++scope={"D":D,"C":C,"re":re,"POST_RU":{"net":"нет","est":"есть","ne_na_meste":"не на месте"}}
++exec(compile(ast.Module(body=[function],type_ignores=[]),"dds-scoring-extraction","exec"),scope)
++
++class DDSRulesTests(unittest.TestCase):
++    def state(self):
++        return {"kartochka":{"_oshibka":None},"nachalo":0.,
++            "statusy":[{"kod":"prinyata","t":1.,"nazvanie":"Принята","kommentariy":""}],
++            "zamechaniya":[],"osnovaniya":{"postuplenie":{"t":0.}},"narusheniya_rechi":[],"zvonki":[]}
++
++    def test_accept_only_not_passed(self):
++        result=scope["ocenit"](self.state())
++        self.assertFalse(result["passed"])
++        self.assertIn("peredacha",result["critical_errors"])
++        self.assertIn("zaversheno",result["critical_errors"])
++        self.assertIsNone(next(f for f in result["fakty"] if f["kod"]=="rech")["proyden"])
++
++    def test_false_status_without_evidence(self):
++        s=self.state();s["statusy"].append({"kod":"zaversheno","t":2,"nazvanie":"Завершено","kommentariy":"готово"})
++        result=scope["ocenit"](s)
++        self.assertIn("po_faktu",result["critical_errors"])
++
++    def test_scoring_uses_frozen_time_limit(self):
++        s=self.state();s["statusy"][0]["t"]=31.
++        s["_rules"]={"dds":copy.deepcopy(C.DDS)}
++        s["_rules"]["dds"]["podtverzhdenie_sec"]=40
++        result=scope["ocenit"](s)
++        self.assertNotIn("podtverzhdenie",result["critical_errors"])
+diff --git a/tests/test_ml.py b/tests/test_ml.py
+new file mode 100644
+index 0000000..680978e
+--- /dev/null
++++ b/tests/test_ml.py
+@@ -0,0 +1,46 @@
++import json
++import os
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++from api import forecast_ml as ml
++from scripts import ml_train
++
++class MLTests(unittest.TestCase):
++    def test_features_no_answer_key(self):
++        s={"kartochka":{"adres_polny":"anything"},"bilet":{"adres_etalon":"SECRET","slozhnost":3}}
++        x=ml.features(s,20,75)
++        s["bilet"]["adres_etalon"]="OTHER";s["itog"]={"passed":True}
++        self.assertEqual(x,ml.features(s,20,75))
++        self.assertTrue(all(type(n) in (float,int) for n in x))
++
++    def test_fail_closed_and_deadline(self):
++        p={"veroyatnost":.3,"proverka_na_sec":75}
++        with patch.dict(os.environ,{"ML_FORECAST_ENABLED":"true","ML_FORECAST_MODEL":"/nonexistent/model.json"}):
++            self.assertEqual(ml.forecast({},20,p)["veroyatnost"],.3)
++            self.assertEqual(ml.forecast({},80,p)["veroyatnost"],0.)
++        with patch.dict(os.environ,{"ML_FORECAST_ENABLED":"false"}):
++            self.assertEqual(ml.forecast({},20,p)["ml_status"],"disabled")
++
++    def test_unapproved_model_rejected(self):
++        with tempfile.TemporaryDirectory() as d:
++            path=Path(d)/"model.json";path.write_text('{"approved":false}')
++            with self.assertRaises(ValueError):ml.load_model(path)
++
++    def test_group_time_split(self):
++        rows=[{"attempt":str(i),"learner":str(i//2),"ts":float(i),"y":i%2,"x":[0]*5} for i in range(250)]
++        a,b,c=ml_train.split(rows)
++        for left,right in [(a,b),(b,c),(a,c)]:
++            self.assertFalse({r["learner"] for r in left}&{r["learner"] for r in right})
++            self.assertLess(max(r["ts"] for r in left),min(r["ts"] for r in right))
++        with self.assertRaises(ValueError):ml_train.split(rows+rows[:1])
++        with self.assertRaises(ValueError):ml_train.split([{**r,"learner":"same"} for r in rows])
++
++    def test_synthetic_training_not_auto_approved(self):
++        rows=[{"attempt":str(i),"learner":str(i//2),"ts":float(i),"y":i%2,
++               "x":[.3,float(i%2),.2,.4,.1]} for i in range(250)]
++        model=ml_train.train({"schema":ml.SCHEMA,"rows":rows})
++        self.assertFalse(model["approved"])
++        self.assertLess(model["validation"]["model"]["brier"],model["validation"]["constant_train_baseline"]["brier"])
++        # This test establishes implementation sanity, NOT accuracy on real calls.
+diff --git a/tests/voice_contract.json b/tests/voice_contract.json
+new file mode 100644
+index 0000000..ef5a322
+--- /dev/null
++++ b/tests/voice_contract.json
+@@ -0,0 +1,11 @@
++{
++  "api/main.py:v_asr": "67c5dc988a9a093155d3619fab111bf4fd40cbcb793e9141c33482c0385118ea",
++  "api/main.py:v_tts": "7e7f3f8e59d8c5eaa53e829b05d426bad056a1384aceb65eb46db3fecbcd6bfb",
++  "api/main.py:voice_health": "d317c305870393ca4922e263c022ae2e2e6e933ca9175b94772288c592a44971",
++  "api/caller.py": "eeca403560547aae366fd98ca84e4f7fea77ea47e30443346310142bcc9e238b",
++  "web/app.js:toggleMic": "1c985cdeeb64cf7d15aae21863b5eaddadd450613136a0dd17214408882269d6",
++  "web/app.js:send": "39496c0e9470ac70296c26541d720bed1a6a7eec5f4d8cefa6cb630c75965d6f",
++  "web/dds.js:micTo": "5d828a321b0577de701c7556aa39b62ec89d82cc79b1e8e833339065a1032579",
++  "web/dds.js:speak": "acc767e86715b610415dd6bbbbac3d2f6b21dffd3a2c7f5c197f6525ab1beb6d",
++  "web/dds.js:ddsPlay": "4cb12209456b523f77cef8f1b31d201a3bbeb17f373e6673e23318ed5227ea17"
++}
+diff --git a/web/app.js b/web/app.js
+index c4d75bf..f220f29 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -147,8 +147,8 @@ async function viewTasks(v) {
+       <td class="muted">${esc((x.scenario?.situaciya || "").slice(0, 80))}…</td>
+       <td class="num">${x.tayming_sec || S.cfg.uchebny_tayming_sec} с</td>
+       <td>${esc(x.deadline || "—")}</td>
+-      <td>${x.vypolneno ? `<span class="badge ${(x.vypolneno.override_ball ?? x.vypolneno.ball) >= 70 ? "b-ok" : "b-bad"}">
+-        ${x.vypolneno.override_ball ?? x.vypolneno.ball}</span>` : `<span class="badge b-dim">не выполнено</span>`}</td>
++      <td>${x.vypolneno ? `<span class="badge ${x.vypolneno.passed == null ? "b-dim" : x.vypolneno.passed ? "b-ok" : "b-bad"}">
++        ${x.vypolneno.override_ball ?? x.vypolneno.ball} · ${x.vypolneno.passed == null ? "архив" : x.vypolneno.passed ? "зачёт" : "не зачтено"}</span>` : `<span class="badge b-dim">не выполнено</span>`}</td>
+       <td><button class="btn btn-sm" onclick="${x.rezhim === "dds" ? `ddsStart('${x.scenario_id}',${x.id},${JSON.stringify(x.dds_sluzhba || "").replace(/"/g, "&quot;")})` : `startFrom('${x.scenario_id}',${x.id})`}">
+         ${x.vypolneno ? "Ещё раз" : "Начать"}</button></td></tr>`).join("")}
+     </table></div>`;
+@@ -190,7 +190,7 @@ function preview(b) {
+     <h3>Заявитель говорит, что находится</h3><div class="muted" style="line-height:1.6">${esc(b.adres_vidimy)}</div>
+     ${b.trebuet_utochneniya ? `<div class="fact no" style="margin-top:12px"><div class="fact-n">Адрес придётся уточнять</div>
+       <div class="fact-src">Эталон скрыт — сверяется автоматически после отправки карточки</div></div>` : ""}
+-    <h3>Группа происшествия</h3><span class="badge b-ac">${esc(S.cfg.gruppy[b.gruppa] || b.gruppa)}</span>
++    <h3>Группа происшествия</h3><span class="badge b-ac">${esc(S.cfg.gruppy[b.gruppa] || b.gruppa || "Определите по ситуации")}</span>
+     <h3>Нормативы</h3><div class="row"><span class="badge b-dim">карточка ${S.cfg.normativy.kartochka_sec} с</span>
+       <span class="badge b-dim">учебный лимит ${S.cfg.uchebny_tayming_sec} с</span></div>
+     <div class="hint">${esc(S.cfg.normativy.istochnik)}</div><hr>
+diff --git a/web/dds.js b/web/dds.js
+index 0125eb5..5ff25dc 100644
+--- a/web/dds.js
++++ b/web/dds.js
+@@ -30,7 +30,7 @@ async function viewDdsList(v) {
+   const draw = f => {
+     f = (f || "").toLowerCase();
+     $("#ddsBody").innerHTML = sc.filter(s => !f || (s.situaciya + s.adres_vidimy + s.nazvanie).toLowerCase().includes(f)).slice(0, 120).map(s => `
+-      <tr class="row"><td>${esc(s.nazvanie)}</td><td>${esc((S.cfg.gruppy[s.gruppa] || s.gruppa).slice(0, 34))}</td>
++      <tr class="row"><td>${esc(s.nazvanie)}</td><td>${esc((S.cfg.gruppy[s.gruppa] || s.gruppa || "Указан в карточке").slice(0, 34))}</td>
+         <td>${"●".repeat(s.slozhnost)}</td><td>${esc(s.adres_vidimy.slice(0, 70))}</td><td>Добавлена</td>
+         <td><button class="btn btn-sm" onclick="ddsStart('${s.id}')">Открыть</button></td></tr>
+       <tr class="desc"><td colspan="6">Описание: ${esc(s.situaciya.slice(0, 150))}</td></tr>`).join("");
+@@ -238,7 +238,7 @@ async function ddsFinish() {
+       <div class="kpi"><div class="v" style="color:${c}">${r.ball}</div><div class="l">Балл · ${r.verdikt}</div></div>
+       <div class="kpi"><div class="v">${r.t_podtverzhdeniya ?? "—"}<span style="font-size:14px"> с</span></div><div class="l">Подтверждение приёма</div><div class="n">норматив ${S.cfg.dds.podtverzhdenie_sec} с</div></div>
+     </div>
+-    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${factsHtml(r.fakty)}/div></div>
++    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${factsHtml(r.fakty)}</div></div>
+     <div><div class="card" style="margin-bottom:10px"><h2>Ошибка оператора 112 в карточке</h2>
+       ${o ? `<div class="fact"><div class="fact-n">Поле «${esc(o.pole)}»</div><div class="fact-d">в карточке: ${esc(POST_RU[o.v_kartochke] || o.v_kartochke)}\nпо записи: ${esc(POST_RU[o.pravda] || o.pravda)}</div></div>`
+         : `<div class="muted">В этой карточке ошибок не было.</div>`}</div>

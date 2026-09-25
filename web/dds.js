@@ -29,7 +29,7 @@ async function viewDdsList(v) {
   const draw = f => {
     f = (f || "").toLowerCase();
     $("#ddsBody").innerHTML = sc.filter(s => !f || (s.situaciya + s.adres_vidimy + s.nazvanie).toLowerCase().includes(f)).slice(0, 120).map(s => `
-      <tr class="row"><td>${esc(s.nazvanie)}</td><td>${esc((S.cfg.gruppy[s.gruppa] || s.gruppa).slice(0, 34))}</td>
+      <tr class="row"><td>${esc(s.nazvanie)}</td><td>${esc((S.cfg.gruppy[s.gruppa] || s.gruppa || "Указан в карточке").slice(0, 34))}</td>
         <td>${"●".repeat(s.slozhnost)}</td><td>${esc(s.adres_vidimy.slice(0, 70))}</td><td>Добавлена</td>
         <td><button class="btn btn-sm" onclick="ddsStart('${s.id}')">Открыть</button></td></tr>
       <tr class="desc"><td colspan="6">Описание: ${esc(s.situaciya.slice(0, 150))}</td></tr>`).join("");
@@ -230,21 +230,19 @@ async function ddsFinish() {
   clearInterval(DS.tim); clearInterval(DS.poll); document.querySelectorAll(".ring").forEach(x => x.remove());
   const r = await api(`/api/dds/${DS.sid}/finish`, {});
   DS.sid = null;
-  const c = r.ball >= 70 ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
+  const c = r.passed ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
   const o = r.oshibka_bylo;
   $("#view").innerHTML = `<div class="grid g2"><div>
     <div class="kpis" style="margin-bottom:10px">
       <div class="kpi"><div class="v" style="color:${c}">${r.ball}</div><div class="l">Балл · ${r.verdikt}</div></div>
       <div class="kpi"><div class="v">${r.t_podtverzhdeniya ?? "—"}<span style="font-size:14px"> с</span></div><div class="l">Подтверждение приёма</div><div class="n">норматив ${S.cfg.dds.podtverzhdenie_sec} с</div></div>
     </div>
-    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${r.fakty.map(f => `<div class="fact ${f.proyden ? "ok" : "no"}">
-      <div class="fact-h"><span class="fact-n">${esc(f.nazvanie)}</span><span class="badge ${f.proyden ? "b-ok" : "b-bad"}">${f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
-      <div class="fact-src">${esc(f.istochnik)}</div><div class="fact-d">${esc(JSON.stringify(f.detali).slice(1, -1).replace(/","/g, '" · "'))}</div></div>`).join("")}</div></div>
+    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${factsHtml(r.fakty)}</div></div>
     <div><div class="card" style="margin-bottom:10px"><h2>Ошибка оператора 112 в карточке</h2>
       ${o ? `<div class="fact"><div class="fact-n">Поле «${esc(o.pole)}»</div><div class="fact-d">в карточке: ${esc(POST_RU[o.v_kartochke] || o.v_kartochke)}\nпо записи: ${esc(POST_RU[o.pravda] || o.pravda)}</div></div>`
         : `<div class="muted">В этой карточке ошибок не было.</div>`}</div>
       <div class="card"><div class="row"><button class="btn" onclick="go('dds')">К списку происшествий</button>
-      <a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${r.session_id}.pdf`)}">Отчёт PDF</a></div></div></div></div>`;
+      <button class="btn btn-g" onclick="openRazbor('${r.session_id}')">История действий</button><a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${r.session_id}.pdf`)}">Отчёт PDF</a></div></div></div></div>`;
 }
 
 /* общий микрофон для телефона ДДС */

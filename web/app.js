@@ -146,8 +146,8 @@ async function viewTasks(v) {
       <td class="muted">${esc((x.scenario?.situaciya || "").slice(0, 80))}…</td>
       <td class="num">${x.tayming_sec || S.cfg.uchebny_tayming_sec} с</td>
       <td>${esc(x.deadline || "—")}</td>
-      <td>${x.vypolneno ? `<span class="badge ${(x.vypolneno.override_ball ?? x.vypolneno.ball) >= 70 ? "b-ok" : "b-bad"}">
-        ${x.vypolneno.override_ball ?? x.vypolneno.ball}</span>` : `<span class="badge b-dim">не выполнено</span>`}</td>
+      <td>${x.vypolneno ? `<span class="badge ${x.vypolneno.passed == null ? "b-dim" : x.vypolneno.passed ? "b-ok" : "b-bad"}">
+        ${x.vypolneno.override_ball ?? x.vypolneno.ball} · ${x.vypolneno.passed == null ? "архив" : x.vypolneno.passed ? "зачёт" : "не зачтено"}</span>` : `<span class="badge b-dim">не выполнено</span>`}</td>
       <td><button class="btn btn-sm" onclick="${x.rezhim === "dds" ? `ddsStart('${x.scenario_id}',${x.id},${JSON.stringify(x.dds_sluzhba || "").replace(/"/g, "&quot;")})` : `startFrom('${x.scenario_id}',${x.id})`}">
         ${x.vypolneno ? "Ещё раз" : "Начать"}</button></td></tr>`).join("")}
     </table></div>`;
@@ -189,7 +189,7 @@ function preview(b) {
     <h3>Заявитель говорит, что находится</h3><div class="muted" style="line-height:1.6">${esc(b.adres_vidimy)}</div>
     ${b.trebuet_utochneniya ? `<div class="fact no" style="margin-top:12px"><div class="fact-n">Адрес придётся уточнять</div>
       <div class="fact-src">Эталон скрыт — сверяется автоматически после отправки карточки</div></div>` : ""}
-    <h3>Группа происшествия</h3><span class="badge b-ac">${esc(S.cfg.gruppy[b.gruppa] || b.gruppa)}</span>
+    <h3>Группа происшествия</h3><span class="badge b-ac">${esc(S.cfg.gruppy[b.gruppa] || b.gruppa || "Определите по ситуации")}</span>
     <h3>Нормативы</h3><div class="row"><span class="badge b-dim">карточка ${S.cfg.normativy.kartochka_sec} с</span>
       <span class="badge b-dim">учебный лимит ${S.cfg.uchebny_tayming_sec} с</span></div>
     <div class="hint">${esc(S.cfg.normativy.istochnik)}</div><hr>
@@ -432,7 +432,7 @@ async function askPrognoz(auto) {
   try {
     S.prognoz = await api(`/api/session/${S.sid}/prognoz`);
     drawSide();
-    if (auto) toast(`Прогноз на ${S.prognoz.t_prognoza_sec} с: уложится в норматив с вероятностью ${S.prognoz.veroyatnost}`);
+    if (auto) toast(`${S.prognoz.label || "Прогноз"} на ${S.prognoz.t_prognoza_sec} с: уложится в норматив с вероятностью ${S.prognoz.veroyatnost}`);
   } catch {}
 }
 function drawSide() {
@@ -442,7 +442,7 @@ function drawSide() {
     const p = S.prognoz, g = p.veroyatnost >= .5;
     h += `<div class="fact ${g ? "ok" : "no"}"><div class="fact-h"><span class="fact-n">Прогноз: уложится в норматив</span>
       <span class="badge ${g ? "b-ok" : "b-bad"}">${p.veroyatnost}</span></div>
-      <div class="fact-src">сделан на ${p.t_prognoza_sec} с · проверка на ${p.proverka_na_sec} с</div>
+      <div class="fact-src">${esc(p.label || "Прогноз")} · сделан на ${p.t_prognoza_sec} с · проверка на ${p.proverka_na_sec} с</div>
       <div class="fact-d">полей ${p.osnovanie.poley_gotovo}/${p.osnovanie.poley_vsego} · осталось ${p.osnovanie.ostalos_sec} с · нужно ≈${p.osnovanie.nuzhno_sec} с</div></div>`;
   } else h += `<div class="muted">Прогноз появится на 30-й секунде.</div>
     <button class="btn btn-g btn-sm" style="margin-top:9px" onclick="askPrognoz()">Запросить сейчас</button>`;
@@ -473,11 +473,12 @@ async function finish() {
 }
 
 function factsHtml(fakty) {
-  return fakty.map(f => `<div class="fact ${f.proyden ? "ok" : "no"}">
+  return fakty.map(f => `<div class="fact ${f.proyden == null ? "" : f.proyden ? "ok" : "no"}">
     <div class="fact-h"><span class="fact-n">${esc(f.nazvanie)}</span>
-      <span class="badge ${f.proyden ? "b-ok" : "b-bad"}">${f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
+      <span class="badge ${f.proyden == null ? "b-dim" : f.proyden ? "b-ok" : "b-bad"}">${f.proyden == null ? "не проверено" : f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
     <div class="fact-src">${esc(f.istochnik)}</div>
-    <div class="fact-d">${esc(detali(f))}</div></div>`).join("");
+    <div class="fact-d">${f.proyden == null ? "Недостаточно наблюдений" : esc(detali(f))}</div>
+    ${(f.evidence_event_ids || []).slice(-3).map(id => `<button class="btn btn-g btn-sm" data-evidence="${esc(id)}">Событие ${esc(id.slice(0,8))}</button>`).join("")}</div>`).join("");
 }
 function detali(f) {
   const d = f.detali || {};
@@ -495,7 +496,7 @@ function detali(f) {
 
 function showRazbor(sid, r) {
   const v = $("#view"); $("#hdrRight").innerHTML = "";
-  const c = r.ball >= 70 ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
+  const c = r.passed ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
   const att = r.attestaciya;
   v.innerHTML = `
   <div class="grid g2">
@@ -505,9 +506,10 @@ function showRazbor(sid, r) {
           <div class="n">${r.nabrano} из ${r.vsego} весов</div></div>
         <div class="kpi"><div class="v" style="color:${r.v_normativ ? "var(--ok)" : "var(--bad)"}">${r.t_sec}<span style="font-size:15px">с</span></div>
           <div class="l">Время карточки</div><div class="n">норматив ${S.cfg.normativy.kartochka_sec} с</div></div>
-        ${att ? `<div class="kpi"><div class="v" style="color:var(--vio)">${att.vyzovov_do_attestacii}</div>
-          <div class="l">Вызовов до освоения</div><div class="n">модель BKT</div></div>` : ""}
+        ${att ? `<div class="kpi"><div class="v" style="color:var(--vio)">${att.vyzovov_do_attestacii ?? "—"}</div>
+          <div class="l">Условных повторений навыка</div><div class="n">BKT · не допуск к работе</div></div>` : ""}
       </div>
+      <button class="btn btn-g" onclick="openRazbor('${sid}')">История действий и версии</button>
       <div class="card"><h2>Граф доказательств <span class="badge b-dim">каждый балл со ссылкой на норму</span></h2>
         ${factsHtml(r.fakty)}</div>
     </div>
@@ -587,63 +589,11 @@ async function drillCell(ids, nav) {
     <td><button class="btn btn-g btn-sm" onclick="openRazbor('${r.id}')">Разбор</button></td></tr>`).join("")}</table>
     <hr><button class="btn btn-g" onclick="closeModal()">Закрыть</button>`);
 }
-async function openRazbor(sid) {
-  const r = await api(`/api/session/${sid}/razbor`);
-  const it = r.itog;
-  modal(`<h2>Разбор вызова · ${esc(r.session.scenario_id)}</h2>
-    <div class="row" style="margin-bottom:12px"><span class="badge b-ac">балл ${it.ball}</span>
-    ${r.session.override_ball != null ? `<span class="badge b-warn">изменён на ${r.session.override_ball}: ${esc(r.session.override_reason)}</span>` : ""}
-    <span class="badge b-dim">${it.t_sec} с</span></div>
-    ${factsHtml(it.fakty)}
-    <h3>Разговор</h3>${r.dialog.map(m => `<div class="msg ${m.kto === "operator" ? "m-op" : "m-cl"}" style="margin-bottom:6px">
-      <b>${(m.t_ms / 1000).toFixed(1)} с · ${m.kto === "operator" ? "Оператор" : "Заявитель"}</b>${esc(m.tekst)}</div>`).join("")}
-    <hr><div class="row"><a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${sid}.pdf`)}">PDF</a>
-    ${S.user.role === "teacher" ? `<button class="btn btn-g" onclick="overrideDlg('${sid}',${it.ball})">Изменить оценку</button>` : ""}
-    <button class="btn btn-g" onclick="closeModal()">Закрыть</button></div>`);
-}
+async function openRazbor(sid) { return detailedRazbor(sid); }
 
 /* ================================================== обучающийся: прогресс и справка */
 
-async function viewProgress(v) {
-  const a = await api("/api/analytics/me");
-  const my = await api("/api/my/sessions");
-  if (!a.n) { v.innerHTML = `<div class="empty"><div class="big">📈</div>Пока нет завершённых вызовов.</div>`; return; }
-  const att = a.attestaciya;
-  v.innerHTML = `
-  <div class="kpis" style="margin-bottom:14px">
-    <div class="kpi"><div class="v">${a.n}</div><div class="l">Вызовов</div></div>
-    <div class="kpi"><div class="v" style="color:var(--ac)">${a.sredniy_ball}</div><div class="l">Средний балл</div><div class="n">n=${a.n}</div></div>
-    <div class="kpi"><div class="v" style="color:var(--ok)">${a.v_normativ}/${a.n}</div><div class="l">В норматив 75 с</div></div>
-    <div class="kpi"><div class="v" style="color:var(--vio)">${att.vse_osvoeny ? "✓" : att.vyzovov_do_attestacii}</div>
-      <div class="l">${att.vse_osvoeny ? "Все навыки освоены" : "Вызовов до освоения"}</div><div class="n">BKT · лимитирует «${esc(S.cfg.skills.find(s => s.kod === att.limitiruyushchiy_navyk)?.nazvanie || "")}»</div></div>
-  </div>
-  <div class="grid g2">
-    <div class="card"><h2>Освоение навыков · BKT</h2>
-      <div class="bars">${Object.entries(a.bkt).map(([k, x]) => `<div class="bar-row">
-        <span>${esc(S.cfg.skills.find(s => s.kod === k)?.nazvanie || k)}</span>
-        <div class="bar"><i style="width:${x.p * 100}%;background:${x.osvoen ? "var(--ok)" : col(x.p)}"></i></div>
-        <span class="num">${pct(x.p)} <span class="muted">n=${x.n}</span></span></div>`).join("")}</div>
-      <div class="hint">Модель Байесовского отслеживания знаний (Corbett & Anderson, 1994).
-        Параметры: обучение ${att.parametry.P_LEARN}, угадывание ${att.parametry.P_GUESS}, ошибка ${att.parametry.P_SLIP}, порог ${att.parametry.MASTERY}.</div></div>
-    <div class="card"><h2>Динамика балла</h2>${dinamHtml(a.dinamika)}</div>
-  </div>
-  <div class="grid g2" style="margin-top:14px">
-    <div class="card"><h2>Рекомендации <span class="badge b-dim">билет, а не совет</span></h2>
-      ${a.rekomendacii.length ? a.rekomendacii.map(r => `<div class="fact no"><div class="fact-n">${esc(r.tekst)}</div>
-        <div class="row" style="margin-top:9px">${r.bilety.map(b => `<button class="tag" onclick="startFrom('${b.id}')">${esc(b.nazvanie)}</button>`).join("") || '<span class="muted">все такие билеты решены</span>'}</div></div>`).join("")
-        : `<div class="muted">Все навыки выше 80%.</div>`}</div>
-    <div class="card"><h2>Точность прогнозов</h2>
-      <h3>Внутри вызова</h3>${prognozTable(a.prognozy_vyzov, "call")}
-      <h3>До освоения</h3>${prognozTable(a.prognozy_attestaciya, "att")}</div>
-  </div>
-  <div class="card" style="margin-top:14px"><h2>Мои вызовы
-    <a class="btn btn-g btn-sm" href="${dl(`/api/otchet/sertifikat/${S.user.id}.pdf`)}">Сертификат PDF</a></h2>
-    <table class="t"><tr><th>Дата</th><th>Сценарий</th><th class="num">Балл</th><th class="num">Время</th><th></th></tr>
-    ${my.map(s => `<tr class="clickable" onclick="openRazbor('${s.id}')"><td>${fmtT(s.started)}</td><td>${esc(s.scenario_id)}</td>
-      <td class="num">${s.override_ball ?? s.ball}${s.override_ball != null ? " *" : ""}</td><td class="num">${s.t_sec} с</td>
-      <td><span class="badge ${s.v_norm ? "b-ok" : "b-bad"}">${s.v_norm ? "в норматив" : "сверх"}</span></td></tr>`).join("")}</table>
-    <div class="hint">* оценка изменена преподавателем</div></div>`;
-}
+async function viewProgress(v) { return viewInsights(v); }
 
 async function viewSpravka(v) {
   const s = await api("/api/spravka");
@@ -817,7 +767,7 @@ async function viewGroup(v) {
     <table class="t"><tr><th>Имя</th><th class="num">Вызовов</th><th class="num">Балл</th><th class="num">В норматив</th><th>Слабый навык</th><th>До освоения (BKT)</th></tr>
     ${a.obuchayushchiesya.map(t => `<tr class="clickable" onclick="userDetail(${t.id})"><td><b>${esc(t.name)}</b></td>
       <td class="num">${t.n}</td><td class="num">${t.ball ?? "—"}</td><td class="num">${t.v_norm}/${t.n}</td>
-      <td>${esc(t.slabyy || "—")}</td><td>${t.gotov ? '<span class="badge b-ok">освоено</span>' : `<span class="badge ${t.do_attestacii > 10 ? "b-bad" : "b-warn"}">${t.do_attestacii} вызовов</span>`}</td></tr>`).join("")}</table></div>
+      <td>${esc(t.slabyy || "—")}</td><td>${t.gotov ? '<span class="badge b-ok">освоено</span>' : `<span class="badge ${t.do_attestacii > 10 ? "b-bad" : "b-warn"}">${t.do_attestacii ?? "—"} повторений</span>`}</td></tr>`).join("")}</table></div>
   <div class="grid g2">
     <div class="card"><h2>Навыки группы</h2>${a.navyki.length ? navBars(a.navyki) : '<div class="muted">Нет данных.</div>'}</div>
     <div class="card"><h2>Динамика группы</h2>${dinamHtml(a.dinamika)}</div>
@@ -826,6 +776,10 @@ async function viewGroup(v) {
   $("#gsel").onchange = e => { S.gid = +e.target.value; viewGroup(v); };
 }
 async function userDetail(uid) {
+  modal('<div id="userInsights"></div>');
+  return viewInsights($("#userInsights"), uid);
+}
+async function legacyUserDetail(uid) {
   const a = await api(`/api/analytics/user/${uid}`);
   modal(`<h2>${esc(a.user.name)}</h2>
     <div class="row" style="margin-bottom:12px"><span class="badge b-dim">вызовов ${a.n}</span>

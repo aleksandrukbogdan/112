@@ -1,0 +1,727 @@
+From da83d7137489458d7eb578a9ee61d62daf5d64e1 Mon Sep 17 00:00:00 2001
+From: Patch author <patch@example.invalid>
+Date: Thu, 24 Sep 2026 01:05:20 -0500
+Subject: [PATCH 3/4] 03 Add evidence replay, reviewed criteria and
+ programme-specific learning plans
+
+
+diff --git a/api/insights.py b/api/insights.py
+new file mode 100644
+index 0000000..f96441c
+--- /dev/null
++++ b/api/insights.py
+@@ -0,0 +1,126 @@
++"""Explainable analytics: programmes, rubric versions and missing evidence stay separate."""
++import copy
++import json
++import math
++import time
++from . import db, bkt, quality as Q, config as C, domain as D
++
++LABELS={x["kod"]:x["nazvanie"] for x in C.SKILLS}
++LABELS.update(podtverzhdenie="Подтверждение приёма",proverka="Проверка карточки",
++              peredacha="Передача бригаде",statusy="Статусы по фактам")
++
++def effective(row):
++    original=json.loads(row["itog"]) if isinstance(row["itog"],str) else row["itog"]
++    review=db.q1("SELECT * FROM evidence_reviews WHERE session_id=? ORDER BY revision DESC LIMIT 1",(row["id"],))
++    return json.loads(review["data"]) if review else original
++
++def attempts(uid,kind):
++    rows=db.q("SELECT * FROM sessions WHERE user_id=? AND kind=? AND state='done' ORDER BY finished,id",(uid,kind))
++    for row in rows:
++        row["itog"]=effective(row)
++    return rows
++
++def interval(success,n):
++    if not n: return None
++    z=1.96; p=success/n; denominator=1+z*z/n
++    center=(p+z*z/(2*n))/denominator
++    radius=z*math.sqrt(p*(1-p)/n+z*z/(4*n*n))/denominator
++    return [round(max(0,center-radius),3),round(min(1,center+radius),3)]
++
++def forecast_metrics(session_ids):
++    # One vote per attempt, the first saved forecast BEFORE the deadline.
++    selected={}
++    for row in db.q("SELECT * FROM forecasts WHERE kind='call' AND fakt IS NOT NULL ORDER BY created,id"):
++        if row["subject"] not in session_ids or row["subject"] in selected: continue
++        p=json.loads(row["data"]); y=json.loads(row["fakt"])
++        if p.get("t_prognoza_sec",0)>=p.get("proverka_na_sec",75): continue
++        selected[row["subject"]]=(float(p["veroyatnost"]),int(bool(y["uspel"])),p.get("method","legacy"))
++    pairs=list(selected.values()); n=len(pairs)
++    buckets=[]
++    for i in range(5):
++        xs=[(p,y) for p,y,_ in pairs if min(4,int(p*5))==i]
++        if xs:
++            buckets.append({"bin":i,"n":len(xs),"predicted":sum(p for p,y in xs)/len(xs),
++                            "observed":sum(y for p,y in xs)/len(xs)})
++    return {"n":n,"unit":"attempt","policy":"first_predeadline",
++            "brier":round(sum((p-y)**2 for p,y,_ in pairs)/n,4) if n else None,
++            "accuracy":round(sum((p>=.5)==bool(y) for p,y,_ in pairs)/n,3) if n else None,
++            "calibration":buckets,"methods":sorted({m for _,_,m in pairs}),
++            "warning":"Описательная статистика, не независимая проверка ML; при малой выборке выводы ненадёжны"}
++
++def profile(uid,kind):
++    if kind not in Q.PROGRAMS: raise ValueError("Unknown programme")
++    all_rows=attempts(uid,kind)
++    rows=[r for r in all_rows if r["itog"].get("rubric_version")==Q.RUBRIC_VERSION]
++    skills=[]
++    for skill in Q.PROGRAMS[kind]:
++        obs=[]
++        for row in rows:
++            values=[f["proyden"] for f in row["itog"]["fakty"]
++                    if Q.FAKT_SKILL.get(f["kod"])==skill and f.get("proyden") is not None]
++            if values: obs.append((row,all(values)))
++        n=len(obs); good=sum(v for r,v in obs)
++        skills.append({"code":skill,"name":LABELS.get(skill,skill),"n":n,
++            "rate":round(good/n,3) if n else None,"interval95":interval(good,n),
++            "recent_rate":round(sum(v for r,v in obs[-10:])/min(n,10),3) if n else None,
++            "status":"not_observed" if not n else "practice" if good/n<.8 else "observed_success",
++            "failed_attempts":[r["id"] for r,v in obs if not v][-5:]})
++    weak=sorted(skills,key=lambda s:(s["n"]>0,s["rate"] if s["rate"] is not None else -1))[:3]
++    scenarios=[json.loads(r["data"]) for r in db.q("SELECT data FROM scenarios WHERE status='published' ORDER BY id")]
++    plan=[]
++    for skill in weak:
++        if skill["n"] and skill["rate"]>=.8: continue
++        pool=scenarios
++        if skill["code"]=="adres": pool=[s for s in pool if s.get("trebuet_utochneniya")]
++        # Low difficulty first; repeated correct practice precedes time pressure.
++        pool=sorted(pool,key=lambda s:(s.get("slozhnost",1),s["id"]))
++        plan.append({"skill":skill["code"],"name":skill["name"],
++            "reason":"Навык ещё не проверен" if not skill["n"] else f"Ошибки в {skill['n']-round(skill['rate']*skill['n'])} из {skill['n']} попыток",
++            "action":"Диагностическая попытка" if not skill["n"] else "Целевая тренировка и повторный разбор",
++            "criterion":"Проверить навык в трёх разных сценариях; это учебная цель, не автоматический допуск",
++            "selection":"Правила по навыку и сложности; покрытие подтвердить преподавателю",
++            "scenarios":[{"id":s["id"],"name":s.get("nazvanie",s["id"])} for s in pool[:3]]})
++    return {"kind":kind,"rubric_version":Q.RUBRIC_VERSION,"n":len(rows),
++            "legacy_excluded":len(all_rows)-len(rows),"passed":sum(r["itog"].get("passed") is True for r in rows),
++            "skills":skills,"plan":plan,"bkt":bkt.profil(uid,kind),
++            "bkt_note":"Параметры BKT не обучены на ваших данных. Не использовать для допуска к работе.",
++            "forecasts":forecast_metrics({r["id"] for r in rows}),
++            "attempts":[{"id":r["id"],"finished":r["finished"],"ball":r["itog"]["ball"],
++                          "passed":r["itog"].get("passed"),"manual_ball":r["override_ball"],
++                          "scenario":r["scenario_id"]} for r in rows]}
++
++def review(sid,changes,reason,actor):
++    """Append-only review. Original result/receipt remains immutable; recompute this programme's BKT."""
++    from fastapi import HTTPException
++    from . import session_store as store
++    with db.tx():
++        row=db.q1("SELECT * FROM sessions WHERE id=? AND state='done'",(sid,))
++        if not row: raise HTTPException(404,"Завершённая попытка не найдена")
++        prior=effective(row)
++        if prior.get("rubric_version")!=Q.RUBRIC_VERSION:
++            raise HTTPException(409,"Архивная рубрика: пересмотр критериев новой рубрикой запрещён")
++        valid={f["kod"] for f in prior["fakty"]}
++        if (not changes or set(changes)-valid or len(reason.strip())<5 or
++            any(v is not None and type(v) is not bool for v in changes.values())):
++            raise HTTPException(422,"Нужны известные критерии, boolean/null и причина от 5 символов")
++        facts=[]
++        for f in copy.deepcopy(prior["fakty"]):
++            if f["kod"] in changes: f["proyden"]=changes[f["kod"]]
++            facts.append(D.Fakt(**{k:f[k] for k in ("kod","nazvanie","proyden","ves","istochnik","detali")},t_ms=f.get("t_ms")))
++        result={**prior,**Q.result(facts,row["kind"])}
++        evidence={f["kod"]:f for f in prior["fakty"]}
++        for f in result["fakty"]:
++            for key in ("evidence_event_ids","evaluated_at_event_id"):
++                if key in evidence[f["kod"]]: f[key]=evidence[f["kod"]][key]
++        rev=db.q1("SELECT COALESCE(MAX(revision),0) n FROM evidence_reviews WHERE session_id=?",(sid,))["n"]+1
++        result["review"]={"revision":rev,"reason":reason.strip(),"actor":actor["id"],"ts":time.time()}
++        db.ex("INSERT INTO evidence_reviews(session_id,revision,actor,reason,data,created) VALUES(?,?,?,?,?,?)",
++              (sid,rev,actor["id"],reason.strip(),store.dumps(result),time.time()))
++        # No reinterpretation of old mixed-programme BKT rows or old rubrics.
++        for skill in Q.PROGRAMS[row["kind"]]:
++            db.ex("DELETE FROM bkt WHERE user_id=? AND skill=?",(row["user_id"],row["kind"]+":"+skill))
++        for past in attempts(row["user_id"],row["kind"]):
++            if past["itog"].get("rubric_version")==Q.RUBRIC_VERSION:
++                bkt.primenit(row["user_id"],past["itog"]["fakty"],row["kind"])
++        db.audit(actor,"evidence_review",{"session":sid,"revision":rev,"changes":changes,"reason":reason})
++        return result
+diff --git a/api/main.py b/api/main.py
+index d5d7daa..c687b07 100644
+--- a/api/main.py
++++ b/api/main.py
+@@ -27,6 +27,7 @@ from . import auth, bkt, caller, config as C, db, dds, domain as D, generator, r
+ from .auth import current_user, role
+ from . import quality as Q
+ from . import session_store as store
++from . import insights
+ 
+ VOICE_URL = os.environ.get("VOICE_URL", "http://voice:8090")      # Vosk (запасной ASR) + Piper (TTS)
+ ASR_URL = os.environ.get("ASR_URL", "http://asr:8091")            # GigaAM на GPU — основной ASR
+@@ -640,7 +641,14 @@ def razbor(sid: str, u=Depends(current_user)):
+     d = json.loads(r["data"])
+     return {"session": {k: r[k] for k in ("id", "user_id", "scenario_id", "started", "finished",
+                                           "ball", "t_sec", "override_ball", "override_reason")},
+-            "itog": json.loads(r["itog"]) if r["itog"] else None,
++            "itog": insights.effective(r) if r["itog"] else None,
++            "original_itog": json.loads(r["itog"]) if r["itog"] else None,
++            "versions": d.get("versions"), "snapshot_origin": d.get("snapshot_origin", "original"),
++            "events": [{**e,"payload":json.loads(e["payload"])} for e in db.q(
++                "SELECT * FROM session_events WHERE session_id=? ORDER BY seq",(sid,))],
++            "reviews": [{**e,"data":json.loads(e["data"])} for e in db.q(
++                "SELECT * FROM evidence_reviews WHERE session_id=? ORDER BY revision",(sid,))],
++            "calls": d.get("zvonki", []),
+             "dialog": d.get("dialog", []), "kartochka": d.get("kartochka", {}),
+             "bilet": d.get("bilet"),
+             "prognozy": [{**x, "data": json.loads(x["data"]),
+@@ -653,6 +661,26 @@ class Override(BaseModel):
+     reason: str
+ 
+ 
++class EvidenceReview(BaseModel):
++    changes: dict[str, Any]
++    reason: str
++
++
++@app.post("/api/session/{sid}/review")
++def review_evidence(sid: str, b: EvidenceReview, u=Depends(role("teacher"))):
++    return insights.review(sid, b.changes, b.reason, u)
++
++
++@app.get("/api/insights/{uid}")
++def user_insights(uid: int, kind: str = "ops112", u=Depends(current_user)):
++    uid = uid or u["id"]
++    if u["role"] == "trainee" and uid != u["id"]:
++        raise HTTPException(403, "Чужая аналитика")
++    if kind not in Q.PROGRAMS:
++        raise HTTPException(422, "Неизвестная программа")
++    return insights.profile(uid, kind)
++
++
+ @app.post("/api/session/{sid}/override")
+ def override(sid: str, b: Override, u=Depends(role("teacher"))):
+     """ТЗ: оценку меняет только преподаватель, с записью в журнал. Администратор — нет."""
+@@ -687,17 +715,17 @@ def live(u=Depends(role("teacher"))):
+ 
+ # ================================================================ аналитика
+ 
+-def _done(user_id=None, group_id=None) -> list[dict]:
++def _done(user_id=None, group_id=None, kind="ops112") -> list[dict]:
+     sql = ("SELECT s.* FROM sessions s JOIN users u ON u.id=s.user_id "
+-           "WHERE s.state='done' AND u.role='trainee'")
+-    args: list = []
++           "WHERE s.state='done' AND u.role='trainee' AND s.kind=?")
++    args: list = [kind]
+     if user_id:
+         sql += " AND s.user_id=?"; args.append(user_id)
+     if group_id:
+         sql += " AND u.group_id=?"; args.append(group_id)
+     rows = db.q(sql + " ORDER BY s.finished", tuple(args))
+     for r in rows:
+-        r["itog"] = json.loads(r["itog"])
++        r["itog"] = insights.effective(r)
+         r["gruppa"] = json.loads(r["data"])["bilet"]["gruppa"]
+         r.pop("data", None)
+     return rows
+@@ -891,10 +919,9 @@ def pdf_lesson(sid: str, token: str = ""):
+         raise HTTPException(404, "нет завершённого занятия")
+     if u["role"] == "trainee" and r["user_id"] != u["id"]:
+         raise HTTPException(403, "чужое занятие")
+-    r["itog"], r["data"] = json.loads(r["itog"]), json.loads(r["data"])
++    r["itog"], r["data"] = insights.effective(r), json.loads(r["data"])
+     usr = db.q1("SELECT name FROM users WHERE id=?", (r["user_id"],))
+-    sc = db.q1("SELECT * FROM scenarios WHERE id=?", (r["scenario_id"],))
+-    return Response(reports.otchet_zanyatiya(r, usr, _sc(sc) if sc else {}),
++    return Response(reports.otchet_zanyatiya(r, usr, r["data"].get("bilet", {})),
+                     media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="otchet-{sid[:8]}.pdf"'})
+ 
+diff --git a/api/reports.py b/api/reports.py
+index 94a459a..9c6877d 100644
+--- a/api/reports.py
++++ b/api/reports.py
+@@ -11,6 +11,7 @@ from __future__ import annotations
+ import io
+ import os
+ import time
++from html import escape
+ 
+ from openpyxl import Workbook
+ from openpyxl.styles import Alignment, Font, PatternFill
+@@ -45,7 +46,7 @@ ST = {
+ 
+ 
+ def _tbl(rows, widths, head=True):
+-    t = Table([[Paragraph(str(c), ST["p"]) for c in r] for r in rows], colWidths=widths)
++    t = Table([[Paragraph(escape(str(c)), ST["p"]) for c in r] for r in rows], colWidths=widths)
+     style = [("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+              ("VALIGN", (0, 0), (-1, -1), "TOP"),
+              ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5)]
+@@ -66,25 +67,32 @@ def otchet_zanyatiya(sess: dict, user: dict, sc: dict) -> bytes:
+          Spacer(1, 6)]
+ 
+     ball = sess.get("override_ball") if sess.get("override_ball") is not None else it["ball"]
++    norm_fact = next((f for f in it["fakty"] if f["kod"] ==
++                     ("podtverzhdenie" if sess.get("kind") == "dds" else "normativ")), {})
++    timing = norm_fact.get("detali", {})
++    elapsed = timing.get("fakt_sec")
++    limit = timing.get("normativ_sec")
+     E.append(_tbl([
+         ["Обучающийся", user["name"], "Дата", time.strftime("%d.%m.%Y %H:%M",
+                                                              time.localtime(sess["started"]))],
+         ["Сценарий", sc.get("nazvanie", sess["scenario_id"]), "Балл",
+          f"{ball} из 100 — {it['verdikt']}"],
+-        ["Время карточки", f"{it['t_sec']} с", "Норматив",
+-         f"{C.NORM['kartochka_sec']} с · отклонение {round(it['t_sec'] - C.NORM['kartochka_sec'], 1):+} с"],
++        ["Подтверждение ДДС" if sess.get("kind") == "dds" else "Отправка карточки",
++         f"{elapsed} с" if elapsed is not None else "нет действия", "Порог попытки",
++         f"{limit} с" if limit is not None else "нет данных"],
+     ], [34 * mm, 58 * mm, 26 * mm, 60 * mm], head=False))
+ 
+     if sess.get("override_ball") is not None:
+         E.append(Spacer(1, 4))
+         E.append(Paragraph(f"Оценка изменена преподавателем: {it['ball']} → "
+-                           f"{sess['override_ball']}. Причина: {sess.get('override_reason') or '—'}",
++                           f"{sess['override_ball']}. Причина: {escape(sess.get('override_reason') or '—')}. "
++                           "Ручной балл не отменяет невыполненные критерии.",
+                            ST["s"]))
+ 
+     E.append(Paragraph("Граф доказательств", ST["h2"]))
+     rows = [["Факт", "Результат", "Вес", "Основание"]]
+     for f in it["fakty"]:
+-        rows.append([f["nazvanie"], "зачтено" if f["proyden"] else "НЕ ЗАЧТЕНО",
++        rows.append([f["nazvanie"], "не проверено" if f["proyden"] is None else "зачтено" if f["proyden"] else "НЕ ЗАЧТЕНО",
+                      f["ves"], f["istochnik"]])
+     E.append(_tbl(rows, [62 * mm, 26 * mm, 12 * mm, 78 * mm]))
+ 
+@@ -107,29 +115,29 @@ def otchet_zanyatiya(sess: dict, user: dict, sc: dict) -> bytes:
+                 zam.append(f"Грамматика: «{g['fragment']}» — {g['zamechanie']}.")
+     E.append(Paragraph("Замечания", ST["h2"]))
+     for z in zam or ["Замечаний нет."]:
+-        E.append(Paragraph("• " + z, ST["p"]))
++        E.append(Paragraph("• " + escape(z), ST["p"]))
+ 
+     zv = sess["data"].get("zvonki") or []
+     if zv:
+         E.append(Paragraph("Переговоры по IP-телефону", ST["h2"]))
+         for c in zv:
+             E.append(Paragraph(f"<b>{'Входящий' if c.get('vhodyashchiy') else 'Исходящий'}: "
+-                               f"{c['kontakt']['nazvanie']}</b> — "
++                               f"{escape(c['kontakt']['nazvanie'])}</b> — "
+                                f"{'ответил' if c['ishod'] == 'otvetil' else 'не ответил'}", ST["p"]))
+             for m in c.get("dialog", []):
+                 kto = "Диспетчер" if m["kto"] == "dispetcher" else "Абонент"
+-                E.append(Paragraph(f"&nbsp;&nbsp;{kto}: {m['tekst']}", ST["p"]))
++                E.append(Paragraph(f"&nbsp;&nbsp;{kto}: {escape(m['tekst'])}", ST["p"]))
+         st = sess["data"].get("statusy") or []
+         if st:
+             E.append(Paragraph("Статусы службы", ST["h2"]))
+             t0 = sess["data"]["nachalo"]
+             for x in st:
+-                E.append(Paragraph(f"{round(x['t'] - t0, 1)} с · <b>{x['nazvanie']}</b>"
+-                                   + (f" — {x['kommentariy']}" if x.get("kommentariy") else ""), ST["p"]))
++                E.append(Paragraph(f"{round(x['t'] - t0, 1)} с · <b>{escape(x['nazvanie'])}</b>"
++                                   + (f" — {escape(x['kommentariy'])}" if x.get("kommentariy") else ""), ST["p"]))
+     E.append(Paragraph("Ход разговора", ST["h2"]))
+     for m in sess["data"].get("dialog", []):
+         kto = "Оператор" if m["kto"] == "operator" else "Заявитель"
+-        E.append(Paragraph(f"<b>{round(m['t_ms'] / 1000, 1)} с · {kto}:</b> {m['tekst']}",
++        E.append(Paragraph(f"<b>{round(m['t_ms'] / 1000, 1)} с · {kto}:</b> {escape(m['tekst'])}",
+                            ST["p"]))
+     doc.build(E)
+     return buf.getvalue()
+@@ -146,12 +154,13 @@ def sertifikat(user: dict, stat: dict) -> bytes:
+                         textColor=colors.HexColor("#0369a1"))
+     E = [Paragraph("СЕРТИФИКАТ", big), Spacer(1, 10),
+          Paragraph("о прохождении практической подготовки на тренажёре оператора ДДС", mid),
+-         Spacer(1, 22), Paragraph(user["name"], nm), Spacer(1, 18),
++         Spacer(1, 22), Paragraph(escape(user["name"]), nm), Spacer(1, 18),
+          Paragraph(f"Выполнено вызовов: {stat['n']} · средний балл: {stat['ball']} · "
+                    f"в норматив {C.NORM['kartochka_sec']} с: {stat['v_norm']}%", mid),
+          Spacer(1, 8),
+          Paragraph(f"Освоение навыков по модели BKT: {stat['osvoeno']} из {stat['navykov']}",
+                    mid),
++         Paragraph("Учебная статистика режима 112. Не является допуском к самостоятельной работе.", ST["s"]),
+          Spacer(1, 40),
+          Paragraph(f"Департамент ГОЧСиПБ города Москвы · {time.strftime('%d.%m.%Y')}",
+                    ST["s"])]
+@@ -177,7 +186,7 @@ def excel(sessii: list[dict], users: dict[int, dict]) -> bytes:
+             users.get(s["user_id"], {}).get("name", "?"), s["scenario_id"],
+             it["ball"], s.get("override_ball") if s.get("override_ball") is not None else it["ball"],
+             it["t_sec"], "да" if it["v_normativ"] else "нет",
+-            *["да" if fk.get(k) else "нет" for k in
++            *["не проверено" if fk.get(k) is None else "да" if fk.get(k) else "нет" for k in
+               ("adres", "tip", "sluzhby", "rech", "grammatika")],
+         ])
+     for col, w in zip("ABCDEFGHIJKL", (17, 26, 14, 7, 12, 9, 11, 8, 8, 9, 8, 11)):
+@@ -185,6 +194,8 @@ def excel(sessii: list[dict], users: dict[int, dict]) -> bytes:
+     for row in ws.iter_rows(min_row=2):
+         for c in row:
+             c.alignment = Alignment(vertical="top")
++            if isinstance(c.value,str) and c.value.startswith(("=","+","-","@")):
++                c.value="'"+c.value
+ 
+     ws2 = wb.create_sheet("Форма 1-112")
+     ws2.append(["№", "Наименование", "Требование", "Факт"])
+diff --git a/tests/support.py b/tests/support.py
+new file mode 100644
+index 0000000..aa6aebc
+--- /dev/null
++++ b/tests/support.py
+@@ -0,0 +1,26 @@
++import json
++import tempfile
++import unittest
++from pathlib import Path
++from api import db, config as C
++
++class DatabaseCase(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory()
++        if db._conn: db._conn.close()
++        db._conn=None
++        db.PG=False
++        db.DB_PATH=Path(self.tmp.name)/"test.db"
++        db.BACKUP_DIR=Path(self.tmp.name)/"backup"
++        C.DATA=Path(__file__).resolve().parents[1]/"data"
++        db.conn()
++
++    def tearDown(self):
++        db._conn.close();db._conn=None
++        self.tmp.cleanup()
++
++    def state(self):
++        s={"id":"s","user_id":1,"bilet":{"id":"example"},"kartochka":{},"dialog":[]}
++        db.ex("INSERT INTO sessions(id,user_id,scenario_id,state,data) VALUES(?,?,?,?,?)",
++              ("s",1,"example","live",json.dumps(s)))
++        return s
+diff --git a/tests/test_insights.py b/tests/test_insights.py
+new file mode 100644
+index 0000000..23d8cec
+--- /dev/null
++++ b/tests/test_insights.py
+@@ -0,0 +1,34 @@
++import json
++import time
++from api import insights, quality as Q, domain as D, db
++from support import DatabaseCase
++
++
++class InsightsTests(DatabaseCase):
++    # Shared temporary SQLite fixture; these tests do not contact a running service.
++    def add_attempt(self,sid,kind,facts,rubric=None):
++        result=Q.result(facts,kind)
++        if rubric: result["rubric_version"]=rubric
++        db.ex("INSERT INTO sessions(id,user_id,scenario_id,kind,state,data,itog,finished) VALUES(?,?,?,?,?,?,?,?)",
++              (sid,1,"example",kind,"done",'{}',json.dumps(result),time.time()))
++
++    def test_profile_separates_legacy_and_modes(self):
++        self.add_attempt("a","ops112",[D.Fakt("adres","Адрес",False,3,"test")])
++        self.add_attempt("b","dds",[D.Fakt("rech","Речь",True,1,"test")])
++        self.add_attempt("c","ops112",[D.Fakt("adres","Адрес",True,3,"test")],"legacy")
++        a=insights.profile(1,"ops112")
++        self.assertEqual((a["n"],a["legacy_excluded"]),(1,1))
++        self.assertEqual(next(s for s in a["skills"] if s["code"]=="rech")["n"],0)
++        self.assertEqual(a["passed"],0)
++
++    def test_one_forecast_per_attempt(self):
++        for t,p in [(20,.2),(30,.9),(80,1.)]:
++            db.ex("INSERT INTO forecasts(kind,subject,created,data,fakt) VALUES(?,?,?,?,?)",
++                  ("call","a",t,json.dumps({"veroyatnost":p,"t_prognoza_sec":t,"proverka_na_sec":75}),'{"uspel":true}'))
++        metric=insights.forecast_metrics({"a"})
++        self.assertEqual(metric["n"],1)
++        self.assertEqual(metric["brier"],.64)
++
++    def test_wilson_bounds(self):
++        self.assertIsNone(insights.interval(0,0))
++        self.assertLess(insights.interval(3,3)[0],.8)
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+index 7ca5ece..e709cd2 100644
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -7,28 +7,9 @@ from unittest.mock import patch
+ from api import db, bkt, session_store as store
+ 
+ 
+-class StorageTests(unittest.TestCase):
+-    def setUp(self):
+-        self.tmp = tempfile.TemporaryDirectory()
+-        if db._conn:
+-            db._conn.close()
+-        db._conn = None
+-        db.PG = False
+-        db.DB_PATH = Path(self.tmp.name)/"test.db"
+-        db.BACKUP_DIR = Path(self.tmp.name)/"backup"
+-        db.conn()
+-
+-    def tearDown(self):
+-        db._conn.close()
+-        db._conn = None
+-        self.tmp.cleanup()
+-
+-    def state(self):
+-        s={"id":"s", "user_id":1, "bilet":{"id":"example"},"kartochka":{},"dialog":[]}
+-        db.ex("INSERT INTO sessions(id,user_id,scenario_id,state,data) VALUES(?,?,?,?,?)",
+-              ("s",1,"example","live",json.dumps(s)))
+-        return s
++from support import DatabaseCase
+ 
++class StorageTests(DatabaseCase):
+     def test_nested_rollback(self):
+         with self.assertRaises(RuntimeError):
+             with db.tx():
+diff --git a/web/app.js b/web/app.js
+index 3282e0e..c4d75bf 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -433,7 +433,7 @@ async function askPrognoz(auto) {
+   try {
+     S.prognoz = await api(`/api/session/${S.sid}/prognoz`);
+     drawSide();
+-    if (auto) toast(`Прогноз на ${S.prognoz.t_prognoza_sec} с: уложится в норматив с вероятностью ${S.prognoz.veroyatnost}`);
++    if (auto) toast(`${S.prognoz.label || "Прогноз"} на ${S.prognoz.t_prognoza_sec} с: уложится в норматив с вероятностью ${S.prognoz.veroyatnost}`);
+   } catch {}
+ }
+ function drawSide() {
+@@ -443,7 +443,7 @@ function drawSide() {
+     const p = S.prognoz, g = p.veroyatnost >= .5;
+     h += `<div class="fact ${g ? "ok" : "no"}"><div class="fact-h"><span class="fact-n">Прогноз: уложится в норматив</span>
+       <span class="badge ${g ? "b-ok" : "b-bad"}">${p.veroyatnost}</span></div>
+-      <div class="fact-src">сделан на ${p.t_prognoza_sec} с · проверка на ${p.proverka_na_sec} с</div>
++      <div class="fact-src">${esc(p.label || "Прогноз")} · сделан на ${p.t_prognoza_sec} с · проверка на ${p.proverka_na_sec} с</div>
+       <div class="fact-d">полей ${p.osnovanie.poley_gotovo}/${p.osnovanie.poley_vsego} · осталось ${p.osnovanie.ostalos_sec} с · нужно ≈${p.osnovanie.nuzhno_sec} с</div></div>`;
+   } else h += `<div class="muted">Прогноз появится на 30-й секунде.</div>
+     <button class="btn btn-g btn-sm" style="margin-top:9px" onclick="askPrognoz()">Запросить сейчас</button>`;
+@@ -474,11 +474,12 @@ async function finish() {
+ }
+ 
+ function factsHtml(fakty) {
+-  return fakty.map(f => `<div class="fact ${f.proyden ? "ok" : "no"}">
++  return fakty.map(f => `<div class="fact ${f.proyden == null ? "" : f.proyden ? "ok" : "no"}">
+     <div class="fact-h"><span class="fact-n">${esc(f.nazvanie)}</span>
+-      <span class="badge ${f.proyden ? "b-ok" : "b-bad"}">${f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
++      <span class="badge ${f.proyden == null ? "b-dim" : f.proyden ? "b-ok" : "b-bad"}">${f.proyden == null ? "не проверено" : f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
+     <div class="fact-src">${esc(f.istochnik)}</div>
+-    <div class="fact-d">${esc(detali(f))}</div></div>`).join("");
++    <div class="fact-d">${f.proyden == null ? "Недостаточно наблюдений" : esc(detali(f))}</div>
++    ${(f.evidence_event_ids || []).slice(-3).map(id => `<button class="btn btn-g btn-sm" data-evidence="${esc(id)}">Событие ${esc(id.slice(0,8))}</button>`).join("")}</div>`).join("");
+ }
+ function detali(f) {
+   const d = f.detali || {};
+@@ -496,7 +497,7 @@ function detali(f) {
+ 
+ function showRazbor(sid, r) {
+   const v = $("#view"); $("#hdrRight").innerHTML = "";
+-  const c = r.ball >= 70 ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
++  const c = r.passed ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
+   const att = r.attestaciya;
+   v.innerHTML = `
+   <div class="grid g2">
+@@ -506,9 +507,10 @@ function showRazbor(sid, r) {
+           <div class="n">${r.nabrano} из ${r.vsego} весов</div></div>
+         <div class="kpi"><div class="v" style="color:${r.v_normativ ? "var(--ok)" : "var(--bad)"}">${r.t_sec}<span style="font-size:15px">с</span></div>
+           <div class="l">Время карточки</div><div class="n">норматив ${S.cfg.normativy.kartochka_sec} с</div></div>
+-        ${att ? `<div class="kpi"><div class="v" style="color:var(--vio)">${att.vyzovov_do_attestacii}</div>
+-          <div class="l">Вызовов до освоения</div><div class="n">модель BKT</div></div>` : ""}
++        ${att ? `<div class="kpi"><div class="v" style="color:var(--vio)">${att.vyzovov_do_attestacii ?? "—"}</div>
++          <div class="l">Условных повторений навыка</div><div class="n">BKT · не допуск к работе</div></div>` : ""}
+       </div>
++      <button class="btn btn-g" onclick="openRazbor('${sid}')">История действий и версии</button>
+       <div class="card"><h2>Граф доказательств <span class="badge b-dim">каждый балл со ссылкой на норму</span></h2>
+         ${factsHtml(r.fakty)}</div>
+     </div>
+@@ -588,63 +590,11 @@ async function drillCell(ids, nav) {
+     <td><button class="btn btn-g btn-sm" onclick="openRazbor('${r.id}')">Разбор</button></td></tr>`).join("")}</table>
+     <hr><button class="btn btn-g" onclick="closeModal()">Закрыть</button>`);
+ }
+-async function openRazbor(sid) {
+-  const r = await api(`/api/session/${sid}/razbor`);
+-  const it = r.itog;
+-  modal(`<h2>Разбор вызова · ${esc(r.session.scenario_id)}</h2>
+-    <div class="row" style="margin-bottom:12px"><span class="badge b-ac">балл ${it.ball}</span>
+-    ${r.session.override_ball != null ? `<span class="badge b-warn">изменён на ${r.session.override_ball}: ${esc(r.session.override_reason)}</span>` : ""}
+-    <span class="badge b-dim">${it.t_sec} с</span></div>
+-    ${factsHtml(it.fakty)}
+-    <h3>Разговор</h3>${r.dialog.map(m => `<div class="msg ${m.kto === "operator" ? "m-op" : "m-cl"}" style="margin-bottom:6px">
+-      <b>${(m.t_ms / 1000).toFixed(1)} с · ${m.kto === "operator" ? "Оператор" : "Заявитель"}</b>${esc(m.tekst)}</div>`).join("")}
+-    <hr><div class="row"><a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${sid}.pdf`)}">PDF</a>
+-    ${S.user.role === "teacher" ? `<button class="btn btn-g" onclick="overrideDlg('${sid}',${it.ball})">Изменить оценку</button>` : ""}
+-    <button class="btn btn-g" onclick="closeModal()">Закрыть</button></div>`);
+-}
++async function openRazbor(sid) { return detailedRazbor(sid); }
+ 
+ /* ================================================== обучающийся: прогресс и справка */
+ 
+-async function viewProgress(v) {
+-  const a = await api("/api/analytics/me");
+-  const my = await api("/api/my/sessions");
+-  if (!a.n) { v.innerHTML = `<div class="empty"><div class="big">📈</div>Пока нет завершённых вызовов.</div>`; return; }
+-  const att = a.attestaciya;
+-  v.innerHTML = `
+-  <div class="kpis" style="margin-bottom:14px">
+-    <div class="kpi"><div class="v">${a.n}</div><div class="l">Вызовов</div></div>
+-    <div class="kpi"><div class="v" style="color:var(--ac)">${a.sredniy_ball}</div><div class="l">Средний балл</div><div class="n">n=${a.n}</div></div>
+-    <div class="kpi"><div class="v" style="color:var(--ok)">${a.v_normativ}/${a.n}</div><div class="l">В норматив 75 с</div></div>
+-    <div class="kpi"><div class="v" style="color:var(--vio)">${att.vse_osvoeny ? "✓" : att.vyzovov_do_attestacii}</div>
+-      <div class="l">${att.vse_osvoeny ? "Все навыки освоены" : "Вызовов до освоения"}</div><div class="n">BKT · лимитирует «${esc(S.cfg.skills.find(s => s.kod === att.limitiruyushchiy_navyk)?.nazvanie || "")}»</div></div>
+-  </div>
+-  <div class="grid g2">
+-    <div class="card"><h2>Освоение навыков · BKT</h2>
+-      <div class="bars">${Object.entries(a.bkt).map(([k, x]) => `<div class="bar-row">
+-        <span>${esc(S.cfg.skills.find(s => s.kod === k)?.nazvanie || k)}</span>
+-        <div class="bar"><i style="width:${x.p * 100}%;background:${x.osvoen ? "var(--ok)" : col(x.p)}"></i></div>
+-        <span class="num">${pct(x.p)} <span class="muted">n=${x.n}</span></span></div>`).join("")}</div>
+-      <div class="hint">Модель Байесовского отслеживания знаний (Corbett & Anderson, 1994).
+-        Параметры: обучение ${att.parametry.P_LEARN}, угадывание ${att.parametry.P_GUESS}, ошибка ${att.parametry.P_SLIP}, порог ${att.parametry.MASTERY}.</div></div>
+-    <div class="card"><h2>Динамика балла</h2>${dinamHtml(a.dinamika)}</div>
+-  </div>
+-  <div class="grid g2" style="margin-top:14px">
+-    <div class="card"><h2>Рекомендации <span class="badge b-dim">билет, а не совет</span></h2>
+-      ${a.rekomendacii.length ? a.rekomendacii.map(r => `<div class="fact no"><div class="fact-n">${esc(r.tekst)}</div>
+-        <div class="row" style="margin-top:9px">${r.bilety.map(b => `<button class="tag" onclick="startFrom('${b.id}')">${esc(b.nazvanie)}</button>`).join("") || '<span class="muted">все такие билеты решены</span>'}</div></div>`).join("")
+-        : `<div class="muted">Все навыки выше 80%.</div>`}</div>
+-    <div class="card"><h2>Точность прогнозов</h2>
+-      <h3>Внутри вызова</h3>${prognozTable(a.prognozy_vyzov, "call")}
+-      <h3>До освоения</h3>${prognozTable(a.prognozy_attestaciya, "att")}</div>
+-  </div>
+-  <div class="card" style="margin-top:14px"><h2>Мои вызовы
+-    <a class="btn btn-g btn-sm" href="${dl(`/api/otchet/sertifikat/${S.user.id}.pdf`)}">Сертификат PDF</a></h2>
+-    <table class="t"><tr><th>Дата</th><th>Сценарий</th><th class="num">Балл</th><th class="num">Время</th><th></th></tr>
+-    ${my.map(s => `<tr class="clickable" onclick="openRazbor('${s.id}')"><td>${fmtT(s.started)}</td><td>${esc(s.scenario_id)}</td>
+-      <td class="num">${s.override_ball ?? s.ball}${s.override_ball != null ? " *" : ""}</td><td class="num">${s.t_sec} с</td>
+-      <td><span class="badge ${s.v_norm ? "b-ok" : "b-bad"}">${s.v_norm ? "в норматив" : "сверх"}</span></td></tr>`).join("")}</table>
+-    <div class="hint">* оценка изменена преподавателем</div></div>`;
+-}
++async function viewProgress(v) { return viewInsights(v); }
+ 
+ async function viewSpravka(v) {
+   const s = await api("/api/spravka");
+@@ -818,7 +768,7 @@ async function viewGroup(v) {
+     <table class="t"><tr><th>Имя</th><th class="num">Вызовов</th><th class="num">Балл</th><th class="num">В норматив</th><th>Слабый навык</th><th>До освоения (BKT)</th></tr>
+     ${a.obuchayushchiesya.map(t => `<tr class="clickable" onclick="userDetail(${t.id})"><td><b>${esc(t.name)}</b></td>
+       <td class="num">${t.n}</td><td class="num">${t.ball ?? "—"}</td><td class="num">${t.v_norm}/${t.n}</td>
+-      <td>${esc(t.slabyy || "—")}</td><td>${t.gotov ? '<span class="badge b-ok">освоено</span>' : `<span class="badge ${t.do_attestacii > 10 ? "b-bad" : "b-warn"}">${t.do_attestacii} вызовов</span>`}</td></tr>`).join("")}</table></div>
++      <td>${esc(t.slabyy || "—")}</td><td>${t.gotov ? '<span class="badge b-ok">освоено</span>' : `<span class="badge ${t.do_attestacii > 10 ? "b-bad" : "b-warn"}">${t.do_attestacii ?? "—"} повторений</span>`}</td></tr>`).join("")}</table></div>
+   <div class="grid g2">
+     <div class="card"><h2>Навыки группы</h2>${a.navyki.length ? navBars(a.navyki) : '<div class="muted">Нет данных.</div>'}</div>
+     <div class="card"><h2>Динамика группы</h2>${dinamHtml(a.dinamika)}</div>
+@@ -827,6 +777,10 @@ async function viewGroup(v) {
+   $("#gsel").onchange = e => { S.gid = +e.target.value; viewGroup(v); };
+ }
+ async function userDetail(uid) {
++  modal('<div id="userInsights"></div>');
++  return viewInsights($("#userInsights"), uid);
++}
++async function legacyUserDetail(uid) {
+   const a = await api(`/api/analytics/user/${uid}`);
+   modal(`<h2>${esc(a.user.name)}</h2>
+     <div class="row" style="margin-bottom:12px"><span class="badge b-dim">вызовов ${a.n}</span>
+diff --git a/web/dds.js b/web/dds.js
+index ce1bca0..0125eb5 100644
+--- a/web/dds.js
++++ b/web/dds.js
+@@ -231,21 +231,19 @@ async function ddsFinish() {
+   clearInterval(DS.tim); clearInterval(DS.poll); document.querySelectorAll(".ring").forEach(x => x.remove());
+   const r = await api(`/api/dds/${DS.sid}/finish`, {});
+   DS.sid = null;
+-  const c = r.ball >= 70 ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
++  const c = r.passed ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
+   const o = r.oshibka_bylo;
+   $("#view").innerHTML = `<div class="grid g2"><div>
+     <div class="kpis" style="margin-bottom:10px">
+       <div class="kpi"><div class="v" style="color:${c}">${r.ball}</div><div class="l">Балл · ${r.verdikt}</div></div>
+       <div class="kpi"><div class="v">${r.t_podtverzhdeniya ?? "—"}<span style="font-size:14px"> с</span></div><div class="l">Подтверждение приёма</div><div class="n">норматив ${S.cfg.dds.podtverzhdenie_sec} с</div></div>
+     </div>
+-    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${r.fakty.map(f => `<div class="fact ${f.proyden ? "ok" : "no"}">
+-      <div class="fact-h"><span class="fact-n">${esc(f.nazvanie)}</span><span class="badge ${f.proyden ? "b-ok" : "b-bad"}">${f.proyden ? "зачтено" : "не зачтено"} · вес ${f.ves}</span></div>
+-      <div class="fact-src">${esc(f.istochnik)}</div><div class="fact-d">${esc(JSON.stringify(f.detali).slice(1, -1).replace(/","/g, '" · "'))}</div></div>`).join("")}</div></div>
++    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${factsHtml(r.fakty)}/div></div>
+     <div><div class="card" style="margin-bottom:10px"><h2>Ошибка оператора 112 в карточке</h2>
+       ${o ? `<div class="fact"><div class="fact-n">Поле «${esc(o.pole)}»</div><div class="fact-d">в карточке: ${esc(POST_RU[o.v_kartochke] || o.v_kartochke)}\nпо записи: ${esc(POST_RU[o.pravda] || o.pravda)}</div></div>`
+         : `<div class="muted">В этой карточке ошибок не было.</div>`}</div>
+       <div class="card"><div class="row"><button class="btn" onclick="go('dds')">К списку происшествий</button>
+-      <a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${r.session_id}.pdf`)}">Отчёт PDF</a></div></div></div></div>`;
++      <button class="btn btn-g" onclick="openRazbor('${r.session_id}')">История действий</button><a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${r.session_id}.pdf`)}">Отчёт PDF</a></div></div></div></div>`;
+ }
+ 
+ /* общий микрофон для телефона ДДС */
+diff --git a/web/index.html b/web/index.html
+index b7ebd1f..d812565 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -23,5 +23,6 @@
+ <div class="modal" id="modal"><div class="modal-box" id="modalBox"></div></div>
+ <script src="/static/dds.js"></script>
+ <script src="/static/app.js"></script>
++<script src="/static/insights.js"></script>
+ </body>
+ </html>
+diff --git a/web/insights.js b/web/insights.js
+new file mode 100644
+index 0000000..f52d91b
+--- /dev/null
++++ b/web/insights.js
+@@ -0,0 +1,72 @@
++/* Evidence and analytics only. No changes to recording, ASR, TTS or phone controls. */
++"use strict";
++
++async function viewInsights(root, uid = 0, kind = "ops112") {
++  root.innerHTML = "Загрузка аналитики…";
++  try {
++    const a = await api(`/api/insights/${Number(uid)}?kind=${encodeURIComponent(kind)}`);
++    root.innerHTML = `<div class="card">
++      <h2>Прогресс и персональный план</h2>
++      <select id="programSelect"><option value="ops112">Оператор 112</option><option value="dds">Диспетчер ДДС</option></select>
++      <p>${a.n} попыток по текущей рубрике · зачтено ${a.passed}. Архивных попыток отдельно: ${a.legacy_excluded}.</p>
++      <p class="hint">${esc(a.bkt_note)} Балл, зачёт и ручная оценка — разные показатели.</p>
++      <table class="t"><tr><th>Навык</th><th>Наблюдений</th><th>Успех</th><th>Интервал 95%</th><th>Последние 10</th></tr>
++      ${a.skills.map(s => `<tr><td>${esc(s.name)}</td><td>${s.n}</td><td>${s.n ? pct(s.rate) : "не проверен"}</td>
++        <td>${s.interval95 ? s.interval95.map(pct).join("–") : "—"}</td><td>${pct(s.recent_rate)}</td></tr>`).join("")}</table>
++      <p class="hint">Интервалы Уилсона — ориентир при допущении независимости. Повторы одного человека зависимы; малое n не доказывает освоение.</p></div>
++      <div class="card" style="margin-top:12px"><h2>Следующий шаг</h2>
++      ${a.plan.map(p => `<section class="fact"><h3>${esc(p.name)} · ${esc(p.action)}</h3><p>${esc(p.reason)}</p>
++        <p>${esc(p.criterion)}</p><div class="row">${p.scenarios.map(s => `<button class="btn btn-g planStart" data-scenario="${esc(s.id)}">${esc(s.name)}</button>`).join("")}</div>
++        <p class="hint">${esc(p.selection)}</p></section>`).join("") || "Слабых навыков по текущей выборке не найдено. Нужна контрольная попытка и решение преподавателя."}</div>
++      <div class="card" style="margin-top:12px"><h2>Проверка прогнозов</h2>
++        <p>Попыток: ${a.forecasts.n} · Brier: ${a.forecasts.brier ?? "—"} (меньше — лучше) · точность: ${pct(a.forecasts.accuracy)}.</p>
++        <p class="hint">Один первый прогноз до дедлайна на попытку. ${esc(a.forecasts.warning)}</p>
++        <table class="t"><tr><th>Средний прогноз</th><th>Фактическая доля</th><th>n</th></tr>
++        ${a.forecasts.calibration.map(x => `<tr><td>${pct(x.predicted)}</td><td>${pct(x.observed)}</td><td>${x.n}</td></tr>`).join("")}</table></div>
++      <div class="card" style="margin-top:12px"><h2>Попытки</h2><table class="t"><tr><th>Дата</th><th>Сценарий</th><th>Балл / зачёт</th><th>Ручной балл</th><th></th></tr>
++        ${a.attempts.slice().reverse().map(r => `<tr><td>${fmtT(r.finished)}</td><td>${esc(r.scenario)}</td>
++        <td>${r.ball} / ${r.passed ? "зачёт" : "не зачтено"}</td><td>${r.manual_ball ?? "—"}</td>
++        <td><button class="btn btn-g inspectAttempt" data-sid="${esc(r.id)}">Разбор</button></td></tr>`).join("")}</table></div>`;
++    const select = root.querySelector("#programSelect"); select.value = kind;
++    select.onchange = () => viewInsights(root, uid, select.value);
++    root.querySelectorAll(".inspectAttempt").forEach(b => b.onclick = () => detailedRazbor(b.dataset.sid));
++    root.querySelectorAll(".planStart").forEach(b => b.onclick = () => {
++      closeModal(); return kind === "dds" ? ddsStart(b.dataset.scenario, null, null) : startFrom(b.dataset.scenario);
++    });
++  } catch (e) { root.textContent = `Ошибка аналитики: ${e.message}`; }
++}
++
++async function detailedRazbor(sid) {
++  try {
++    const r = await api(`/api/session/${encodeURIComponent(sid)}/razbor`), it = r.itog;
++    modal(`<h2>Разбор · ${esc(r.session.scenario_id)}</h2>
++      <p>Балл: ${it.ball} · ${esc(it.verdikt)} · критические ошибки: ${esc((it.critical_errors || []).join(", ") || "нет")}</p>
++      <p>Ручной балл: ${r.session.override_ball ?? "—"}. Он не меняет доказательства и профиль навыков.</p>
++      ${it.review ? `<p>Пересмотр критериев №${it.review.revision}: ${esc(it.review.reason)}</p>` : ""}
++      ${factsHtml(it.fakty)}
++      <details><summary>Версии и исходная оценка</summary><pre style="white-space:pre-wrap">${esc(JSON.stringify({versions:r.versions,origin:r.snapshot_origin,original:r.original_itog?.ball},null,2))}</pre></details>
++      <h3>История действий</h3><p class="hint">События сохранения, а не запись звука. Для старых попыток история может отсутствовать.</p>
++      ${(r.events || []).map(e => `<details id="ev-${esc(e.event_id)}"><summary>№${e.seq} · ${Math.max(0,e.ts-r.session.started).toFixed(1)} с · ${esc(e.type)}</summary>
++        <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(e.payload,null,2))}</pre></details>`).join("") || "Нет событий"}
++      <h3>Разговоры</h3><pre style="white-space:pre-wrap">${esc(JSON.stringify(r.calls?.length ? r.calls : r.dialog,null,2))}</pre>
++      <hr><div class="row"><button class="btn" id="closeEvidence">Закрыть</button>
++      ${S.user.role === "teacher" ? '<button class="btn btn-g" id="reviewEvidence">Пересмотреть критерий</button>' : ""}</div>`);
++    $("#closeEvidence").onclick = closeModal;
++    if ($("#reviewEvidence")) $("#reviewEvidence").onclick = async () => {
++      const code = prompt("Код критерия: " + it.fakty.map(f => f.kod).join(", "));
++      if (!code) return;
++      const value = prompt("true — выполнен, false — не выполнен, null — не проверен");
++      if (!["true","false","null"].includes(value)) return toast("Неверное значение", "bad");
++      const reason = prompt("Причина пересмотра (не менее 5 символов)");
++      if (!reason) return;
++      try {
++        await api(`/api/session/${encodeURIComponent(sid)}/review`,{changes:{[code]:JSON.parse(value)},reason});
++        await detailedRazbor(sid);
++      } catch(e) { toast(e.message,"bad"); }
++    };
++    $("#modalBox").querySelectorAll("[data-evidence]").forEach(b => b.onclick = () => {
++      const node = document.getElementById("ev-"+b.dataset.evidence);
++      if(node) { node.open=true; node.scrollIntoView({block:"center",behavior:"smooth"}); }
++    });
++  } catch(e) { toast(e.message,"bad"); }
++}

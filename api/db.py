@@ -1,3 +1,4 @@
+
 """
 Хранилище.
 
@@ -27,9 +28,11 @@ PG = DATABASE_URL.startswith("postgres")
 DB_PATH = Path(os.environ.get("DB_PATH", "/app/state/t112.db"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/app/state/backup"))
 _lock = threading.RLock()
+_transaction = threading.local()
 
 TABLES = ["groups", "users", "scenarios", "assignments", "sessions", "forecasts",
-          "bkt", "audit", "settings"]
+          "bkt", "audit", "settings", "schema_migrations", "content_versions", "session_events",
+          "completion_receipts", "evidence_reviews"]
 WITH_ID = {"groups", "users", "scenarios", "assignments", "sessions", "forecasts", "audit"}
 
 
@@ -102,7 +105,24 @@ def conn():
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.executescript(_schema(False))
             _conn.commit()
+        migrate(_conn)
     return _conn
+
+
+def migrate(c):
+    """Additive migration: existing attempts and aggregate BKT rows are retained."""
+    from .migrations import MIGRATIONS
+    c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied DOUBLE PRECISION)")
+    try:
+        for version, statements in MIGRATIONS:
+            if not c.execute(_sql("SELECT version FROM schema_migrations WHERE version=?"), (version,)).fetchone():
+                for statement in statements:
+                    c.execute(statement)
+                c.execute(_sql("INSERT INTO schema_migrations(version,applied) VALUES(?,?)"), (version,time.time()))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
 
 
 def _sql(s: str) -> str:
@@ -119,11 +139,11 @@ def q(sql: str, args=()) -> list[dict]:
         try:
             cur = c.execute(_sql(sql), tuple(args))
             r = _rows(cur)
-            if PG:
+            if PG and not getattr(_transaction, "depth", 0):
                 c.commit()
             return r
         except Exception:
-            if PG:
+            if PG and not getattr(_transaction, "depth", 0):
                 c.rollback()
             raise
 
@@ -147,10 +167,12 @@ def ex(sql: str, args=()):
             else:
                 cur = c.execute(s, tuple(args))
                 rid = getattr(cur, "lastrowid", None)
-            c.commit()
+            if not getattr(_transaction, "depth", 0):
+                c.commit()
             return rid
         except Exception:
-            c.rollback()
+            if not getattr(_transaction, "depth", 0):
+                c.rollback()
             raise
 
 
@@ -159,16 +181,24 @@ def tx():
     """Пакет изменений одной транзакцией."""
     with _lock:
         c = conn()
+        depth = getattr(_transaction, "depth", 0)
+        _transaction.depth = depth + 1
 
         class _T:
             def execute(self, sql, args=()):
                 return c.execute(_sql(sql), tuple(args))
         try:
+            if not depth and not PG:
+                c.execute("BEGIN IMMEDIATE")
             yield _T()
-            c.commit()
+            if not depth:
+                c.commit()
         except Exception:
-            c.rollback()
+            if not depth:
+                c.rollback()
             raise
+        finally:
+            _transaction.depth = depth
 
 
 def setting(key: str, default=None):
@@ -204,8 +234,11 @@ def size_bytes() -> int:
 
 def backup_now(keep: int = 14) -> str:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    dump = {"format": "t112-backup-1", "created": time.time(), "backend": backend(),
-            "tables": {t: q(f"SELECT * FROM {t}") for t in TABLES}}
+    with tx() as txc:
+        if PG:
+            txc.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        dump = {"format": "t112-backup-2", "created": time.time(), "backend": backend(),
+                "tables": {t: q(f"SELECT * FROM {t}") for t in TABLES}}
     name = BACKUP_DIR / f"t112-{time.strftime('%Y%m%d-%H%M%S')}.json.gz"
     with gzip.open(name, "wt", encoding="utf-8") as f:
         json.dump(dump, f, ensure_ascii=False, default=str)
@@ -232,6 +265,7 @@ def restore(path: str) -> dict:
     if PG:   # счётчики id — после ручной вставки
         for t in WITH_ID - {"scenarios", "sessions"}:
             q(f"SELECT setval(pg_get_serial_sequence('{t}','id'), COALESCE((SELECT MAX(id) FROM {t}),0)+1, false)")
+    migrate(conn())
     return n
 
 

@@ -15,3 +15,12 @@ __pycache__/
 state/
 voice/models/
 voice/*.zip
+
+venv/
+.venv/
+*.bak
+*.bak.*
+*.log
+old/
+112_patch_bundle.zip
+.pytest_cache/

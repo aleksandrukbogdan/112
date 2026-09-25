@@ -1,0 +1,11 @@
+{
+  "api/main.py:v_asr": "67c5dc988a9a093155d3619fab111bf4fd40cbcb793e9141c33482c0385118ea",
+  "api/main.py:v_tts": "7e7f3f8e59d8c5eaa53e829b05d426bad056a1384aceb65eb46db3fecbcd6bfb",
+  "api/main.py:voice_health": "d317c305870393ca4922e263c022ae2e2e6e933ca9175b94772288c592a44971",
+  "api/caller.py": "eeca403560547aae366fd98ca84e4f7fea77ea47e30443346310142bcc9e238b",
+  "web/app.js:toggleMic": "1c985cdeeb64cf7d15aae21863b5eaddadd450613136a0dd17214408882269d6",
+  "web/app.js:send": "39496c0e9470ac70296c26541d720bed1a6a7eec5f4d8cefa6cb630c75965d6f",
+  "web/dds.js:micTo": "5d828a321b0577de701c7556aa39b62ec89d82cc79b1e8e833339065a1032579",
+  "web/dds.js:speak": "acc767e86715b610415dd6bbbbac3d2f6b21dffd3a2c7f5c197f6525ab1beb6d",
+  "web/dds.js:ddsPlay": "4cb12209456b523f77cef8f1b31d201a3bbeb17f373e6673e23318ed5227ea17"
+}

@@ -1,3 +1,4 @@
+
 """
 Тренажёр оператора ДДС · Москва. API.
 
@@ -7,6 +8,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import copy
 import os
 import shutil
 import time
@@ -22,6 +25,10 @@ from pydantic import BaseModel
 
 from . import auth, bkt, caller, config as C, db, dds, domain as D, generator, reports
 from .auth import current_user, role
+from . import quality as Q
+from . import session_store as store
+from . import insights
+from . import forecast_ml
 
 VOICE_URL = os.environ.get("VOICE_URL", "http://voice:8090")      # Vosk (запасной ASR) + Piper (TTS)
 ASR_URL = os.environ.get("ASR_URL", "http://asr:8091")            # GigaAM на GPU — основной ASR
@@ -37,10 +44,35 @@ LIVE: dict[str, dict] = {}
 NEED = ["opisanie", "adres_polny", "zayavitel_fio", "zayavitel_telefon", "tip_kod"]
 
 
+@app.middleware("http")
+async def serialize_commands(request, call_next):
+    # LIVE is process-local: deploy exactly ONE API worker. Voice remains parallel.
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/voice/"):
+        async with app.state.command_lock:
+            return await call_next(request)
+    return await call_next(request)
+
+
+def reload_live():
+    LIVE.clear()
+    dds.LIVE.clear()
+    for row in db.q("SELECT * FROM sessions WHERE state='live'"):
+        state = json.loads(row["data"])
+        # Old unfinished attempts have no historical classifier snapshot.
+        if not state.get("versions"):
+            state["snapshot_origin"] = "upgrade_not_original"
+        (dds.LIVE if row.get("kind") == "dds" else LIVE)[row["id"]] = state
+        with db.tx():
+            store.persist(state)
+
+
 # ================================================================ старт
 
 @app.on_event("startup")
 def startup():
+    if int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
+        raise RuntimeError("This patch requires one API worker (LIVE state)")
+    app.state.command_lock = asyncio.Lock()
     db.conn()
     made = auth.ensure_defaults()
     if made:
@@ -55,9 +87,7 @@ def startup():
                           "VALUES(?,?,?,?,?,?,?)",
                           (b["id"], "bilet", "published", json.dumps(b, ensure_ascii=False),
                            time.time(), time.time(), "банк билетов ДГОЧСиПБ"))
-    for s in db.q("SELECT * FROM sessions WHERE state='live'"):
-        d = json.loads(s["data"])
-        (dds.LIVE if s.get("kind") == "dds" else LIVE)[s["id"]] = d
+    reload_live()
     db.start_backup_thread(int(os.environ.get("BACKUP_PERIOD_SEC", 86400)))
 
 
@@ -237,7 +267,7 @@ def scenarios(status: str | None = None, u=Depends(current_user)):
         rows = db.q("SELECT * FROM scenarios WHERE status=? ORDER BY source, id", (status,))
     else:
         rows = db.q("SELECT * FROM scenarios ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END, source, id")
-    return [_sc(r) for r in rows]
+    return [Q.public_scenario(_sc(r)) if u["role"] == "trainee" else _sc(r) for r in rows]
 
 
 class Gen(BaseModel):
@@ -385,10 +415,15 @@ def assignments(u=Depends(current_user)):
     for r in rows:
         sc = db.q1("SELECT * FROM scenarios WHERE id=?", (r["scenario_id"],))
         r["scenario"] = _sc(sc) if sc else None
+        if r["scenario"] and u["role"] == "trainee":
+            r["scenario"] = Q.public_scenario(r["scenario"])
         if u["role"] == "trainee":
             r["vypolneno"] = db.q1(
-                "SELECT ball, override_ball FROM sessions WHERE user_id=? AND assignment_id=? "
+                "SELECT id,itog,ball,override_ball FROM sessions WHERE user_id=? AND assignment_id=? "
                 "AND state='done' ORDER BY finished DESC LIMIT 1", (u["id"], r["id"]))
+            if r["vypolneno"]:
+                r["vypolneno"]["passed"] = insights.effective(r["vypolneno"]).get("passed")
+                r["vypolneno"].pop("itog", None)
     return rows
 
 
@@ -427,8 +462,7 @@ def del_assign(aid: int, u=Depends(role("teacher"))):
 # ================================================================ занятие
 
 def _persist(sid: str) -> None:
-    db.ex("UPDATE sessions SET data=? WHERE id=?",
-          (json.dumps(LIVE[sid], ensure_ascii=False, default=str), sid))
+    store.persist(LIVE[sid])
 
 
 def _live(sid: str, u: dict) -> dict:
@@ -446,29 +480,31 @@ class Start(BaseModel):
 
 
 @app.post("/api/session")
+@store.command(LIVE)
 def start(b: Start, u=Depends(role("trainee", "teacher"))):
     row = db.q1("SELECT * FROM scenarios WHERE id=?", (b.scenario_id,))
     if not row or (row["status"] != "published" and u["role"] == "trainee"):
         raise HTTPException(404, "сценарий недоступен")
     sc = json.loads(row["data"])
     tm = tayming()
-    if b.assignment_id:
-        a = db.q1("SELECT tayming_sec FROM assignments WHERE id=?", (b.assignment_id,))
-        if a and a["tayming_sec"]:
-            tm = a["tayming_sec"]
+    a = store.assignment(b.assignment_id, u, b.scenario_id, "ops112")
+    if a and a["tayming_sec"]:
+        tm = a["tayming_sec"]
     sid = str(uuid.uuid4())
     s = {"id": sid, "user_id": u["id"], "bilet": sc, "scenario_id": b.scenario_id,
          "assignment_id": b.assignment_id, "nachalo": time.time(), "dialog": [],
          "kartochka": {}, "narusheniya_rechi": [], "t_adres_ms": None, "t_tip_ms": None,
          "t_otpravki_sec": None, "adres_raskryt": False, "tayming_sec": tm}
     LIVE[sid] = s
+    store.freeze(s)
     db.ex("INSERT INTO sessions(id,user_id,scenario_id,assignment_id,started,state,data) "
           "VALUES(?,?,?,?,?,?,?)", (sid, u["id"], b.scenario_id, b.assignment_id,
                                     s["nachalo"], "live", json.dumps(s, ensure_ascii=False)))
+    store.event(s, "session_started", {"versions": s["versions"], "kind": "ops112"})
     return {"session_id": sid, "privetstvie": "Служба 112, оператор слушает вас.",
             "normativ_sec": C.NORM["kartochka_sec"], "tayming_sec": tm,
             "scenario": {k: sc.get(k) for k in ("id", "bilet", "vyzov", "slozhnost",
-                                                 "gruppa", "situaciya", "trebuet_utochneniya")}}
+                                                 "situaciya", "trebuet_utochneniya")}}
 
 
 class Replika(BaseModel):
@@ -477,9 +513,10 @@ class Replika(BaseModel):
 
 @app.post("/api/session/{sid}/replika")
 async def replika(sid: str, b: Replika, u=Depends(current_user)):
-    s = _live(sid, u)
+    original = _live(sid, u)
+    s = copy.deepcopy(original)
     t_ms = int((time.time() - s["nachalo"]) * 1000)
-    nar = D.proverit_rech(b.tekst)
+    nar = D.proverit_rech(b.tekst, s.get("_rules", {}).get("speech"))
     if nar:
         s["narusheniya_rechi"].extend([{**n, "t_ms": t_ms} for n in nar])
     s["dialog"].append({"kto": "operator", "tekst": b.tekst, "t_ms": t_ms})
@@ -490,7 +527,13 @@ async def replika(sid: str, b: Replika, u=Depends(current_user)):
     otv = await caller.otvet(bil, s["dialog"], b.tekst, stress=min(5, bil["slozhnost"]))
     s["dialog"].append({"kto": "caller", "tekst": otv,
                         "t_ms": int((time.time() - s["nachalo"]) * 1000)})
-    _persist(sid)
+    try:
+        with db.tx():
+            store.persist(s)
+        LIVE[sid] = s
+    except Exception:
+        LIVE[sid] = original
+        raise
     return {"otvet": otv, "narusheniya_rechi": nar, "adres_raskryt": s["adres_raskryt"],
             "podskazka": "Заявитель уточнил адрес — внесите его в карточку" if utoch else None}
 
@@ -503,8 +546,9 @@ class Pole(BaseModel):
 def _pereschitat(s: dict) -> dict:
     """СМП и полиция в классификаторе условны: три колонки СМП, признак правонарушения."""
     k = s["kartochka"]
-    poz = C.load("index").get(str(k.get("tip_kod", "")))
+    poz = store.index(s).get(str(k.get("tip_kod", "")))
     if not poz:
+        k["sluzhby"] = []
         return {}
     sl = list(poz["sluzhby"])
     pr = {x: "безусловно по классификатору" for x in sl}
@@ -522,7 +566,9 @@ def _pereschitat(s: dict) -> dict:
 
 
 @app.post("/api/session/{sid}/pole")
+@store.command(LIVE)
 def pole(sid: str, b: Pole, u=Depends(current_user)):
+    Q.validate_card({b.key: b.value})
     s = _live(sid, u)
     t_ms = int((time.time() - s["nachalo"]) * 1000)
     s["kartochka"][b.key] = b.value
@@ -536,9 +582,11 @@ def pole(sid: str, b: Pole, u=Depends(current_user)):
 
 
 @app.get("/api/session/{sid}/prognoz")
+@store.command(LIVE)
 def prognoz(sid: str, u=Depends(current_user)):
     s = _live(sid, u)
-    p = D.prognoz_v_vyzove(s, time.time() - s["nachalo"])
+    t = time.time() - s["nachalo"]
+    p = forecast_ml.forecast(s, t, D.prognoz_v_vyzove(s, t))
     p["id"] = db.ex("INSERT INTO forecasts(kind,subject,created,data) VALUES(?,?,?,?)",
                     ("call", sid, time.time(), json.dumps(p)))
     return p
@@ -550,7 +598,9 @@ class Otpravka(BaseModel):
 
 
 @app.post("/api/session/{sid}/otpravit")
+@store.command(LIVE, complete=True)
 def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
+    Q.validate_card(b.kartochka)
     s = _live(sid, u)
     t = round(time.time() - s["nachalo"], 1)
     s["t_otpravki_sec"] = t
@@ -559,9 +609,11 @@ def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
         if k == "adres_polny" and s["t_adres_ms"] is None and str(v).strip():
             s["t_adres_ms"] = int(t * 1000)
     if b.sluzhby:
+        Q.validate_card({"sluzhby": b.sluzhby})
         s["kartochka"]["sluzhby"] = b.sluzhby
+    _persist(sid)
     oc = D.ocenit(s)
-    itog = {"t_sec": t, "v_normativ": t <= C.NORM["kartochka_sec"], **oc}
+    itog = {"t_sec": t, "v_normativ": t <= s["_rules"]["norm"]["kartochka_sec"], **oc}
 
     for f in db.q("SELECT * FROM forecasts WHERE kind='call' AND subject=? AND fakt IS NULL", (sid,)):
         p = json.loads(f["data"])
@@ -574,19 +626,7 @@ def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
     if u["role"] == "trainee":
         prof = bkt.primenit(u["id"], oc["fakty"])
         att = bkt.prognoz_attestacii(u["id"])
-        prev = db.q1("SELECT * FROM forecasts WHERE kind='attestation' AND subject=? "
-                     "AND fakt IS NULL ORDER BY created DESC LIMIT 1", (str(u["id"]),))
-        if prev and att["vse_osvoeny"]:
-            p = json.loads(prev["data"])
-            sdelano = db.q1("SELECT COUNT(*) n FROM sessions WHERE user_id=? AND state='done' "
-                            "AND finished>?", (u["id"], prev["created"]))["n"] + 1
-            db.ex("UPDATE forecasts SET fakt=?,fakt_at=?,verno=? WHERE id=?",
-                  (json.dumps({"vyzovov": sdelano}), time.time(),
-                   1 if abs(sdelano - p["vyzovov_do_attestacii"]) <= 2 else 0, prev["id"]))
-        elif not prev and not att["vse_osvoeny"]:
-            db.ex("INSERT INTO forecasts(kind,subject,created,data) VALUES(?,?,?,?)",
-                  ("attestation", str(u["id"]), time.time(), json.dumps(att)))
-
+        # A best-case BKT count is not a time-to-attestation prediction.
     db.ex("UPDATE sessions SET state='done',finished=?,data=?,ball=?,t_sec=?,v_norm=?,itog=? WHERE id=?",
           (time.time(), json.dumps(s, ensure_ascii=False, default=str), oc["ball"], t,
            1 if itog["v_normativ"] else 0, json.dumps(itog, ensure_ascii=False), sid))
@@ -601,10 +641,19 @@ def razbor(sid: str, u=Depends(current_user)):
         raise HTTPException(404, "нет занятия")
     if u["role"] == "trainee" and r["user_id"] != u["id"]:
         raise HTTPException(403, "чужое занятие")
+    if u["role"] == "trainee" and r["state"] != "done":
+        raise HTTPException(409, "Разбор доступен после завершения")
     d = json.loads(r["data"])
     return {"session": {k: r[k] for k in ("id", "user_id", "scenario_id", "started", "finished",
                                           "ball", "t_sec", "override_ball", "override_reason")},
-            "itog": json.loads(r["itog"]) if r["itog"] else None,
+            "itog": insights.effective(r) if r["itog"] else None,
+            "original_itog": json.loads(r["itog"]) if r["itog"] else None,
+            "versions": d.get("versions"), "snapshot_origin": d.get("snapshot_origin", "original"),
+            "events": [{**e,"payload":json.loads(e["payload"])} for e in db.q(
+                "SELECT * FROM session_events WHERE session_id=? ORDER BY seq",(sid,))],
+            "reviews": [{**e,"data":json.loads(e["data"])} for e in db.q(
+                "SELECT * FROM evidence_reviews WHERE session_id=? ORDER BY revision",(sid,))],
+            "calls": d.get("zvonki", []),
             "dialog": d.get("dialog", []), "kartochka": d.get("kartochka", {}),
             "bilet": d.get("bilet"),
             "prognozy": [{**x, "data": json.loads(x["data"]),
@@ -615,6 +664,26 @@ def razbor(sid: str, u=Depends(current_user)):
 class Override(BaseModel):
     ball: int
     reason: str
+
+
+class EvidenceReview(BaseModel):
+    changes: dict[str, Any]
+    reason: str
+
+
+@app.post("/api/session/{sid}/review")
+def review_evidence(sid: str, b: EvidenceReview, u=Depends(role("teacher"))):
+    return insights.review(sid, b.changes, b.reason, u)
+
+
+@app.get("/api/insights/{uid}")
+def user_insights(uid: int, kind: str = "ops112", u=Depends(current_user)):
+    uid = uid or u["id"]
+    if u["role"] == "trainee" and uid != u["id"]:
+        raise HTTPException(403, "Чужая аналитика")
+    if kind not in Q.PROGRAMS:
+        raise HTTPException(422, "Неизвестная программа")
+    return insights.profile(uid, kind)
 
 
 @app.post("/api/session/{sid}/override")
@@ -651,17 +720,17 @@ def live(u=Depends(role("teacher"))):
 
 # ================================================================ аналитика
 
-def _done(user_id=None, group_id=None) -> list[dict]:
+def _done(user_id=None, group_id=None, kind="ops112") -> list[dict]:
     sql = ("SELECT s.* FROM sessions s JOIN users u ON u.id=s.user_id "
-           "WHERE s.state='done' AND u.role='trainee'")
-    args: list = []
+           "WHERE s.state='done' AND u.role='trainee' AND s.kind=?")
+    args: list = [kind]
     if user_id:
         sql += " AND s.user_id=?"; args.append(user_id)
     if group_id:
         sql += " AND u.group_id=?"; args.append(group_id)
     rows = db.q(sql + " ORDER BY s.finished", tuple(args))
     for r in rows:
-        r["itog"] = json.loads(r["itog"])
+        r["itog"] = insights.effective(r)
         r["gruppa"] = json.loads(r["data"])["bilet"]["gruppa"]
         r.pop("data", None)
     return rows
@@ -671,7 +740,8 @@ def _navyki(rows) -> list[dict]:
     nav: dict[str, list] = {}
     for x in rows:
         for k, v in x["itog"]["navyki"].items():
-            nav.setdefault(k, []).append(v)
+            if v is not None:
+                nav.setdefault(k, []).append(v)
     known = {s["kod"] for s in C.SKILLS}
     nav = {k: v for k, v in nav.items() if k in known}
     return sorted([{"kod": k, "nazvanie": next(s["nazvanie"] for s in C.SKILLS if s["kod"] == k),
@@ -688,7 +758,7 @@ def _heat(rows) -> list[dict]:
     for x in rows:
         for f in x["itog"]["fakty"]:
             k = karta.get(f["kod"])
-            if not k:
+            if not k or f.get("proyden") is None:
                 continue
             c = cells.setdefault((x["gruppa"], k), {"v": 0, "p": 0, "s": []})
             c["v"] += 1
@@ -854,10 +924,9 @@ def pdf_lesson(sid: str, token: str = ""):
         raise HTTPException(404, "нет завершённого занятия")
     if u["role"] == "trainee" and r["user_id"] != u["id"]:
         raise HTTPException(403, "чужое занятие")
-    r["itog"], r["data"] = json.loads(r["itog"]), json.loads(r["data"])
+    r["itog"], r["data"] = insights.effective(r), json.loads(r["data"])
     usr = db.q1("SELECT name FROM users WHERE id=?", (r["user_id"],))
-    sc = db.q1("SELECT * FROM scenarios WHERE id=?", (r["scenario_id"],))
-    return Response(reports.otchet_zanyatiya(r, usr, _sc(sc) if sc else {}),
+    return Response(reports.otchet_zanyatiya(r, usr, r["data"].get("bilet", {})),
                     media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="otchet-{sid[:8]}.pdf"'})
 
@@ -957,6 +1026,7 @@ def restore(name: str, u=Depends(role("admin"))):
         raise HTTPException(404, "нет файла")
     safety = db.backup_now()
     n = db.restore(str(f))
+    reload_live()
     db.audit(u, "restore", {"file": f.name, "strahovochnaya_kopiya": Path(safety).name})
     return {"ok": True, "vosstanovleno": n, "strahovka": Path(safety).name}
 

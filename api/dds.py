@@ -1,3 +1,4 @@
+
 """
 Режим «Диспетчер ДДС».
 
@@ -31,6 +32,7 @@ from pydantic import BaseModel
 
 from . import bkt, config as C, db, domain as D
 from .auth import current_user, role
+from . import session_store as store
 
 router = APIRouter(prefix="/api/dds", tags=["dds"])
 LIVE: dict[str, dict] = {}
@@ -175,10 +177,10 @@ def _kontakty(sl: str) -> list[dict]:
 
 def _peredano(tekst: str, pravda: dict) -> dict:
     """Что из обязательного диспетчер передал бригаде (по всем своим репликам звонка)."""
-    adr = D.sravnit_adres(tekst, pravda["adres"])
+    adr = D.Q.compare_address(tekst, pravda["adres"], spoken=True)
     op = D.tokens(pravda["opisanie"])
     sut = len(op & D.tokens(tekst)) >= 2
-    tel_d = re.sub(r"\D", "", pravda["telefon"])[-4:]
+    tel_d = re.sub(r"\D", "", pravda["telefon"])
     tel = bool(tel_d) and tel_d in re.sub(r"\D", "", tekst)
     post = bool(re.search(r"пострадав|травм|без сознания|раненых|жертв", tekst.lower()))
     return {"adres": adr["sovpalo"], "adres_dolya": adr["dolya"], "sut": sut,
@@ -190,7 +192,7 @@ def _faza(s: dict) -> str:
     if not v:
         return "ne_vyehala"
     dt = _now() - v
-    e = C.DDS["etapy_sec"]
+    e = s.get("_rules", {}).get("dds", C.DDS)["etapy_sec"]
     if dt >= e["pribytie"] + e["raboty"] + e["zaversheno"]:
         return "zaversheno"
     if dt >= e["pribytie"] + e["raboty"]:
@@ -228,7 +230,7 @@ def _otvet_brigady(s: dict, call: dict, tekst: str) -> str:
             s["brigada"] = br["id"]
             s["peredano"] = p
             _osnovanie(s, "vyezd", "звонок бригаде")
-            e = C.DDS["etapy_sec"]
+            e = s.get("_rules", {}).get("dds", C.DDS)["etapy_sec"]
             t0 = s["t_vyezd"]
             s["sobytiya"] += [
                 {"id": f"ev{i}", "t": t0 + dt, "faza": f, "kontakt": br, "status": "ozhidaet"}
@@ -294,8 +296,7 @@ def _mine(sid: str, u: dict) -> dict:
 
 
 def _persist(s: dict) -> None:
-    db.ex("UPDATE sessions SET data=? WHERE id=?",
-          (json.dumps(s, ensure_ascii=False, default=str), s["id"]))
+    store.persist(s)
 
 
 @router.get("/sluzhby")
@@ -311,15 +312,18 @@ def nastroyki(u=Depends(current_user)):
 
 
 @router.post("/session")
+@store.command(LIVE, kind="dds")
 def start(b: Start, u=Depends(role("trainee", "teacher"))):
     row = db.q1("SELECT * FROM scenarios WHERE id=?", (b.scenario_id,))
     if not row or (row["status"] != "published" and u["role"] == "trainee"):
         raise HTTPException(404, "сценарий недоступен")
     bil = json.loads(row["data"])
     sl = b.sluzhba
-    if b.assignment_id:
-        a = db.q1("SELECT dds_sluzhba FROM assignments WHERE id=?", (b.assignment_id,))
-        sl = sl or (a or {}).get("dds_sluzhba")
+    a = store.assignment(b.assignment_id, u, b.scenario_id, "dds")
+    if a:
+        if sl and a.get("dds_sluzhba") and sl != a["dds_sluzhba"]:
+            raise HTTPException(403, "Служба не соответствует назначению")
+        sl = sl or a.get("dds_sluzhba")
     k = sobrat_kartochku(bil, sl)
     sid = str(uuid.uuid4())
     s = {"id": sid, "kind": "dds", "user_id": u["id"], "scenario_id": b.scenario_id,
@@ -330,10 +334,12 @@ def start(b: Start, u=Depends(role("trainee", "teacher"))):
          "statusy": [], "zamechaniya": [], "zvonki": [], "sobytiya": [],
          "brigada": None, "t_vyezd": None, "peredano": None, "narusheniya_rechi": []}
     LIVE[sid] = s
+    store.freeze(s)
     db.ex("INSERT INTO sessions(id,user_id,scenario_id,kind,assignment_id,started,state,data) "
           "VALUES(?,?,?,?,?,?,?,?)",
           (sid, u["id"], b.scenario_id, "dds", b.assignment_id, s["nachalo"], "live",
            json.dumps(s, ensure_ascii=False, default=str)))
+    store.event(s, "session_started", {"versions": s["versions"], "kind": "dds"})
     return {"session_id": sid, "kartochka": _publichnaya(k), "zapis": s["zapis"],
             "kontakty": s["kontakty"], "statusy": C.DDS["statusy"],
             "podtverzhdenie_sec": C.DDS["podtverzhdenie_sec"]}
@@ -345,10 +351,11 @@ class Status(BaseModel):
 
 
 @router.post("/{sid}/status")
+@store.command(LIVE, kind="dds")
 def status(sid: str, b: Status, u=Depends(current_user)):
     """Статус ставится всегда — проверка «по факту» идёт в оценке, как в жизни."""
     s = _mine(sid, u)
-    st = next((x for x in C.DDS["statusy"] if x["kod"] == b.status), None)
+    st = next((x for x in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if x["kod"] == b.status), None)
     if not st:
         raise HTTPException(400, "нет такого статуса")
     s["statusy"].append({"kod": st["kod"], "nazvanie": st["nazvanie"], "t": _now(),
@@ -370,6 +377,7 @@ class Zamech(BaseModel):
 
 
 @router.post("/{sid}/zamechanie")
+@store.command(LIVE, kind="dds")
 def zamechanie(sid: str, b: Zamech, u=Depends(current_user)):
     """Диспетчер отмечает ошибку оператора 112 в карточке (универсальный алгоритм, п. 3)."""
     s = _mine(sid, u)
@@ -384,6 +392,7 @@ class Zvonok(BaseModel):
 
 
 @router.post("/{sid}/call")
+@store.command(LIVE, kind="dds")
 def call(sid: str, b: Zvonok, u=Depends(current_user)):
     s = _mine(sid, u)
     k = next((x for x in s["kontakty"] if x["id"] == b.kontakt), None)
@@ -409,12 +418,13 @@ class Say(BaseModel):
 
 
 @router.post("/{sid}/call/{cid}/say")
+@store.command(LIVE, kind="dds")
 def say(sid: str, cid: str, b: Say, u=Depends(current_user)):
     s = _mine(sid, u)
     c = next((x for x in s["zvonki"] if x["id"] == cid), None)
     if not c or c["konec"] or c["ishod"] != "otvetil":
         raise HTTPException(400, "звонок не активен")
-    nar = D.proverit_rech(b.tekst)
+    nar = D.proverit_rech(b.tekst, s.get("_rules", {}).get("speech"))
     if nar:
         s["narusheniya_rechi"] += [{**n, "t": _now()} for n in nar]
     c["dialog"].append({"kto": "dispetcher", "tekst": b.tekst, "t": _now()})
@@ -425,6 +435,7 @@ def say(sid: str, cid: str, b: Say, u=Depends(current_user)):
 
 
 @router.post("/{sid}/call/{cid}/end")
+@store.command(LIVE, kind="dds")
 def end(sid: str, cid: str, u=Depends(current_user)):
     s = _mine(sid, u)
     c = next((x for x in s["zvonki"] if x["id"] == cid), None)
@@ -435,6 +446,7 @@ def end(sid: str, cid: str, u=Depends(current_user)):
 
 
 @router.get("/{sid}/events")
+@store.command(LIVE, kind="dds")
 def events(sid: str, u=Depends(current_user)):
     """Опрос раз в секунду: входящие звонки старшего бригады, чьё время пришло."""
     s = _mine(sid, u)
@@ -444,15 +456,17 @@ def events(sid: str, u=Depends(current_user)):
         if e["status"] == "ozhidaet" and now >= e["t"]:
             e["status"] = "zvonit"
         if e["status"] == "zvonit":
-            if now - e["t"] > C.DDS["vhodyashchiy_zvonok_zhdat_sec"]:
+            if now - e["t"] > s.get("_rules", {}).get("dds", C.DDS)["vhodyashchiy_zvonok_zhdat_sec"]:
                 e["status"] = "propushchen"
             else:
                 out.append({"id": e["id"], "ot": e["kontakt"]["nazvanie"], "faza": e["faza"]})
+    _persist(s)
     return {"vhodyashchie": out, "faza": _faza(s), "t_sec": round(now - s["nachalo"], 1),
             "propushcheno": sum(1 for e in s["sobytiya"] if e["status"] == "propushchen")}
 
 
 @router.post("/{sid}/incoming/{eid}/answer")
+@store.command(LIVE, kind="dds")
 def answer(sid: str, eid: str, u=Depends(current_user)):
     s = _mine(sid, u)
     e = next((x for x in s["sobytiya"] if x["id"] == eid), None)
@@ -472,6 +486,7 @@ def answer(sid: str, eid: str, u=Depends(current_user)):
 # ================================================================ оценка
 
 def ocenit(s: dict) -> dict:
+    cfg_dds = s.get("_rules", {}).get("dds", C.DDS)
     k = s["kartochka"]
     t0 = s["nachalo"]
     F: list[D.Fakt] = []
@@ -479,10 +494,10 @@ def ocenit(s: dict) -> dict:
     first = st[0] if st else None
     prin = next((x for x in st if x["kod"] == "prinyata"), None)
     tp = round(prin["t"] - t0, 1) if prin else None
-    F.append(D.Fakt("podtverzhdenie", f"Приём подтверждён за {C.DDS['podtverzhdenie_sec']} с",
-                    bool(prin) and first["kod"] == "prinyata" and tp <= C.DDS["podtverzhdenie_sec"], 3,
+    F.append(D.Fakt("podtverzhdenie", f"Приём подтверждён за {cfg_dds['podtverzhdenie_sec']} с",
+                    bool(prin) and first["kod"] == "prinyata" and tp <= s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"], 3,
                     "ПП РФ 1931, п. 9 подп. «р»: подтверждение ДДС — 30 с",
-                    {"fakt_sec": tp, "normativ_sec": C.DDS["podtverzhdenie_sec"]}))
+                    {"fakt_sec": tp, "normativ_sec": s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"]}))
 
     osh = k["_oshibka"]
     zam = s["zamechaniya"]
@@ -516,48 +531,42 @@ def ocenit(s: dict) -> dict:
     bez = []
     pozdno = []
     for x in st:
-        cfg = next(c for c in C.DDS["statusy"] if c["kod"] == x["kod"])
+        cfg = next(c for c in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if c["kod"] == x["kod"])
         o = osn.get(cfg["osnovanie"])
         if not o or o["t"] > x["t"]:
             bez.append(x["nazvanie"])
-        elif x["t"] - o["t"] > C.DDS["svoevremenno_sec"] and x["kod"] != "prinyata":
+        elif x["t"] - o["t"] > s.get("_rules", {}).get("dds", C.DDS)["svoevremenno_sec"] and x["kod"] != "prinyata":
             pozdno.append(f"{x['nazvanie']}: {round(x['t'] - o['t'])} с")
     F.append(D.Fakt("po_faktu", "Статусы только по факту получения информации", bool(st) and not bez, 3,
-                    C.DDS["istochnik_statusov"], {"bez_osnovaniya": bez}))
-    F.append(D.Fakt("svoevremenno", f"Статус обновлён не позже {C.DDS['svoevremenno_sec']} с после сведений",
+                    s.get("_rules", {}).get("dds", C.DDS)["istochnik_statusov"], {"bez_osnovaniya": bez}))
+    F.append(D.Fakt("svoevremenno", f"Статус обновлён не позже {cfg_dds['svoevremenno_sec']} с после сведений",
                     bool(st) and not pozdno, 2, "Учебный норматив, настраивается", {"pozdno": pozdno}))
     zaversh = any(x["kod"] == "zaversheno" for x in st)
     F.append(D.Fakt("zaversheno", "Реагирование доведено до «Работы завершены»", zaversh, 2,
                     "Памятка для ДДС", {"poslednij": st[-1]["nazvanie"] if st else None}))
-    nuzhen = {c["kod"] for c in C.DDS["statusy"] if c["kommentariy"]}
+    nuzhen = {c["kod"] for c in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if c["kommentariy"]}
     bez_k = [x["nazvanie"] for x in st if x["kod"] in nuzhen and not x["kommentariy"]]
     F.append(D.Fakt("kommentarii", "Комментарии к статусам заполнены", bool(st) and not bez_k, 1,
                     "Памятка для ДДС", {"bez_kommentariya": bez_k}))
     nar = s["narusheniya_rechi"]
-    F.append(D.Fakt("rech", "Правила речи в переговорах", not nar, 1, "Методика МЧС России",
+    speech = any(m.get("kto") == "dispetcher" and m.get("tekst", "").strip()
+                 for call in s.get("zvonki", []) for m in call.get("dialog", []))
+    F.append(D.Fakt("rech", "Правила речи в переговорах", not nar if speech else None, 1, "Методика МЧС России",
                     {"narusheniy": len(nar), "spisok": nar[:5]}))
 
-    nab = sum(f.ves for f in F if f.proyden)
-    vse = sum(f.ves for f in F)
-    ball = round(100 * nab / vse)
-    grp = {"podtverzhdenie": ["podtverzhdenie"], "proverka": ["proverka", "lozhnye"],
-           "peredacha": ["peredacha"], "statusy": ["po_faktu", "svoevremenno", "zaversheno", "kommentarii"],
-           "rech": ["rech"]}
-    fk = {f.kod: f.proyden for f in F}
-    navyki = {g: round(sum(fk[x] for x in ks) / len(ks), 2) for g, ks in grp.items()}
-    return {"ball": ball, "nabrano": nab, "vsego": vse, "fakty": [f.to_dict() for f in F],
-            "navyki": navyki, "verdikt": "зачёт" if ball >= 70 else "не зачтено",
-            "t_podtverzhdeniya": tp}
+    return {**D.Q.result(F, "dds"), "t_podtverzhdeniya": tp}
 
 
 @router.post("/{sid}/finish")
+@store.command(LIVE, kind="dds", complete=True)
 def finish(sid: str, u=Depends(current_user)):
     s = _mine(sid, u)
+    _persist(s)
     oc = ocenit(s)
     t = round(_now() - s["nachalo"], 1)
-    v_norm = oc["t_podtverzhdeniya"] is not None and oc["t_podtverzhdeniya"] <= C.DDS["podtverzhdenie_sec"]
+    v_norm = oc["t_podtverzhdeniya"] is not None and oc["t_podtverzhdeniya"] <= s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"]
     itog = {"t_sec": t, "v_normativ": v_norm, "kind": "dds", **oc}
-    prof = bkt.primenit(u["id"], oc["fakty"]) if u["role"] == "trainee" else {}
+    prof = bkt.primenit(u["id"], oc["fakty"], "dds") if u["role"] == "trainee" else {}
     db.ex("UPDATE sessions SET state='done',finished=?,data=?,ball=?,t_sec=?,v_norm=?,itog=? WHERE id=?",
           (_now(), json.dumps(s, ensure_ascii=False, default=str), oc["ball"], t,
            1 if v_norm else 0, json.dumps(itog, ensure_ascii=False), sid))

@@ -1,3 +1,4 @@
+
 """
 Ядро: сверка адреса, граф доказательств, оценка.
 
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 from . import config as C
+from . import quality as Q
 
 # ---------------------------------------------------------------- адрес
 
@@ -63,41 +65,16 @@ def sravnit_adres(vvod: str, etalon: str) -> dict:
     ориентир, оператор обязан довести до точного адреса.
     Это самая ценная проверка во всём тренажёре.
     """
-    tv, te = tokens(vvod), tokens(etalon)
-    if not te:
-        return {"sovpalo": False, "dolya": 0.0, "naydeno": [], "propushcheno": []}
-
-    # числа (дом, корпус, километр) весят больше слов
-    chisla_e = {t for t in te if t.isdigit()}
-    chisla_v = {t for t in tv if t.isdigit()}
-    slova_e = te - chisla_e
-    slova_v = tv - chisla_e
-
-    sovp_ch = chisla_e & chisla_v
-    sovp_sl = slova_e & slova_v
-
-    ves_ch = 2.0
-    itog = (len(sovp_ch) * ves_ch + len(sovp_sl))
-    maks = (len(chisla_e) * ves_ch + len(slova_e)) or 1
-    dolya = round(itog / maks, 3)
-
-    return {
-        "sovpalo": dolya >= 0.7,
-        "dolya": dolya,
-        "naydeno": sorted(sovp_ch | sovp_sl),
-        "propushcheno": sorted(te - tv),
-        "etalon": etalon,
-        "vvod": vvod,
-    }
+    return Q.compare_address(vvod, etalon)
 
 
 # ---------------------------------------------------------------- речь
 
-def proverit_rech(tekst: str) -> list[dict]:
+def proverit_rech(tekst: str, rules=None) -> list[dict]:
     """Нарушения правил речи по методике МЧС."""
     low = norm_txt(tekst)
     out = []
-    for kod, rule in C.RECH.items():
+    for kod, rule in (C.RECH if rules is None else rules).items():
         for obr in rule["obrazcy"]:
             if norm_txt(obr) in low:
                 out.append({
@@ -129,7 +106,7 @@ _GRAM = [
 ]
 
 
-def proverit_grammatiku(tekst: str) -> list[dict]:
+def proverit_grammatiku(tekst: str, rules=None) -> list[dict]:
     """
     Проверка ручного ввода. Требование ТЗ: отчёт о занятии должен
     содержать сведения о грамматике.
@@ -137,7 +114,7 @@ def proverit_grammatiku(tekst: str) -> list[dict]:
     out = []
     t = (tekst or "")
     low = t.lower().replace("ё", "е")
-    for pat, opis in _GRAM:
+    for pat, opis in (_GRAM if rules is None else rules):
         m = re.search(pat, low)
         if m:
             out.append({"fragment": m.group(0), "zamechanie": opis})
@@ -154,14 +131,15 @@ def proverit_grammatiku(tekst: str) -> list[dict]:
 class Fakt:
     kod: str
     nazvanie: str
-    proyden: bool
+    proyden: bool | None
     ves: int
     istochnik: str
     detali: dict = field(default_factory=dict)
     t_ms: int | None = None
 
     def to_dict(self):
-        return asdict(self)
+        return {**asdict(self), "status": "not_observed" if self.proyden is None else
+                ("pass" if self.proyden else "fail")}
 
 
 def postroit_grafu(sess: dict) -> list[Fakt]:
@@ -172,7 +150,9 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
     bil = sess["bilet"]
     k = sess["kartochka"]
     f: list[Fakt] = []
-    idx = C.load("index")
+    from . import session_store as store
+    idx = store.index(sess)
+    norm_cfg = sess.get("_rules", {}).get("norm", C.NORM)
 
     # 1. адрес против эталона
     adr = sravnit_adres(k.get("adres_polny", ""), bil["adres_etalon"])
@@ -186,6 +166,8 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
     # у сгенерированных сценариев эталон точнее: ещё и признак 1-го уровня
     if verno_grp and bil.get("pr1_etalon"):
         verno_grp = poz["pr1"] == bil["pr1_etalon"]
+    if bil.get("kod_etalon"):
+        verno_grp = bool(poz) and kod == bil["kod_etalon"]
     f.append(Fakt("tip", "Тип происшествия выбран верно", verno_grp, 3,
                   "Классификатор 0.46.24",
                   {"vybrano": kod, "itog": poz["itog"] if poz else None,
@@ -193,10 +175,10 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
                    "gruppa_etalon": bil["gruppa"]}, sess.get("t_tip_ms")))
 
     # 3. службы против классификатора
-    nado = set(poz["sluzhby"]) if poz else set()
+    nado = set(Q.routes(poz, k))
     bylo = set(k.get("sluzhby", []))
-    sovp = bool(nado) and nado.issubset(bylo)
-    f.append(Fakt("sluzhby", "Службы назначены верно", sovp or (not nado and bool(bylo)), 3,
+    sovp = bool(poz) and nado == bylo
+    f.append(Fakt("sluzhby", "Службы назначены верно", sovp, 3,
                   "Классификатор 0.46.24, колонки маршрутизации",
                   {"nado": sorted(nado), "naznacheno": sorted(bylo),
                    "propushcheno": sorted(nado - bylo),
@@ -204,10 +186,10 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
 
     # 4. норматив 75 с
     t = sess.get("t_otpravki_sec")
-    v_norm = t is not None and t <= C.NORM["kartochka_sec"]
-    f.append(Fakt("normativ", f"Карточка отправлена за {C.NORM['kartochka_sec']} с",
-                  bool(v_norm), 3, C.NORM["istochnik"],
-                  {"fakt_sec": t, "normativ_sec": C.NORM["kartochka_sec"]}))
+    v_norm = t is not None and t <= norm_cfg["kartochka_sec"]
+    f.append(Fakt("normativ", f"Карточка отправлена за {norm_cfg['kartochka_sec']} с",
+                  bool(v_norm), 3, norm_cfg["istochnik"],
+                  {"fakt_sec": t, "normativ_sec": norm_cfg["kartochka_sec"]}))
 
     # 5. учебный тайминг из ТЗ
     ut = sess.get("tayming_sec") or C.UCHEBNY_TAYMING_SEC
@@ -225,13 +207,14 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
 
     # 7. речь
     nar = sess.get("narusheniya_rechi", [])
-    f.append(Fakt("rech", "Правила речи соблюдены", not nar, 2,
+    speech = any(m.get("kto") == "operator" and m.get("tekst", "").strip() for m in sess.get("dialog", []))
+    f.append(Fakt("rech", "Правила речи соблюдены", not nar if speech else None, 2,
                   "Методика МЧС России",
                   {"narusheniy": len(nar), "spisok": nar[:6]}))
 
     # 8. грамматика
-    gram = proverit_grammatiku(k.get("opisanie", ""))
-    f.append(Fakt("grammatika", "Грамматика описания", not gram, 1,
+    gram = proverit_grammatiku(k.get("opisanie", ""), sess.get("_rules", {}).get("grammar"))
+    f.append(Fakt("grammatika", "Грамматика описания", not gram if k.get("opisanie", "").strip() else None, 1,
                   "ТЗ ДГОЧСиПБ: отчёт должен содержать сведения о грамматике",
                   {"zamechaniy": len(gram), "spisok": gram[:6]}))
 
@@ -241,28 +224,7 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
 def ocenit(sess: dict) -> dict:
     """Оценка из графа. Никаких моделей — только веса фактов."""
     fakty = postroit_grafu(sess)
-    nabrano = sum(x.ves for x in fakty if x.proyden)
-    vsego = sum(x.ves for x in fakty) or 1
-    ball = round(100 * nabrano / vsego)
-
-    po_navykam = {}
-    karta = {"adres": "adres", "tip": "tip", "sluzhby": "sluzhby",
-             "normativ": "tayming", "uchebny_tayming": "tayming",
-             "rech": "rech", "grammatika": "rech", "polnota": "polnota"}
-    for x in fakty:
-        nav = karta.get(x.kod)
-        if nav:
-            po_navykam.setdefault(nav, []).append(x.proyden)
-    navyki = {k: round(sum(v) / len(v), 2) for k, v in po_navykam.items()}
-
-    return {
-        "ball": ball,
-        "nabrano": nabrano,
-        "vsego": vsego,
-        "fakty": [x.to_dict() for x in fakty],
-        "navyki": navyki,
-        "verdikt": "зачёт" if ball >= 70 else "не зачтено",
-    }
+    return Q.result(fakty, "ops112")
 
 
 # ---------------------------------------------------------------- прогноз
@@ -272,7 +234,7 @@ def prognoz_v_vyzove(sess: dict, t_sec: float) -> dict:
     Прогноз ВНУТРИ вызова: уложится ли в норматив.
     Проверяется через 45 секунд после выдачи — прямо при экспертах.
     """
-    norm = C.NORM["kartochka_sec"]
+    norm = sess.get("_rules", {}).get("norm", C.NORM)["kartochka_sec"]
     k = sess["kartochka"]
     obyaz = ["adres_polny", "opisanie", "zayavitel_fio", "zayavitel_telefon", "tip_kod"]
     gotovo = sum(1 for x in obyaz if str(k.get(x, "")).strip())
@@ -285,7 +247,9 @@ def prognoz_v_vyzove(sess: dict, t_sec: float) -> dict:
     nuzhno_sec = (nado / temp) if temp > 0 else 999
 
     p = 0.5
-    if nado == 0:
+    if t_sec >= norm:
+        p = 0.0
+    elif nado == 0:
         p = 0.98
     elif nuzhno_sec <= ostalos * 0.7:
         p = 0.85
@@ -298,6 +262,8 @@ def prognoz_v_vyzove(sess: dict, t_sec: float) -> dict:
 
     return {
         "predmet": "uspeet_v_normativ",
+        "method": "heuristic-v2", "calibrated": False,
+        "label": "Эвристический индекс, не калиброванная вероятность",
         "veroyatnost": round(p, 2),
         "t_prognoza_sec": round(t_sec, 1),
         "proverka_na_sec": norm,

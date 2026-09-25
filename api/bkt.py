@@ -1,101 +1,64 @@
-"""
-Байесовское отслеживание знаний (Corbett & Anderson, 1994).
-
-Для каждого обучающегося и каждого навыка хранится вероятность
-освоения p. После каждого вызова она обновляется по результату
-соответствующего факта графа доказательств.
-
-Четыре параметра, все интерпретируемы:
-  P_INIT   — вероятность, что навык уже освоен до обучения
-  P_LEARN  — вероятность освоить навык за одну попытку
-  P_GUESS  — вероятность выполнить верно, не владея навыком
-  P_SLIP   — вероятность ошибиться, владея навыком
-
-Навык считается освоенным при p >= MASTERY (0,95 — стандартный порог).
-"""
-from __future__ import annotations
-
-import math
+"""BKT baseline; mastery is model state, not certified readiness."""
 import time
-
 from . import db
+from .quality import PROGRAMS, FAKT_SKILL
 
-P_INIT, P_LEARN, P_GUESS, P_SLIP = 0.10, 0.10, 0.25, 0.10
-MASTERY = 0.95
+P_INIT, P_LEARN, P_GUESS, P_SLIP = .1, .1, .25, .1
+MASTERY = .95
+FAKT_NAVYK = FAKT_SKILL
 
-# факт графа доказательств → навык
-FAKT_NAVYK = {
-    "adres": "adres", "tip": "tip", "sluzhby": "sluzhby",
-    "normativ": "tayming", "polnota": "polnota", "rech": "rech",
-    # режим ДДС
-    "podtverzhdenie": "podtverzhdenie", "proverka": "proverka",
-    "peredacha": "peredacha", "po_faktu": "statusy",
-}
+def obnovit(p, verno, params=None):
+    p = max(0., min(1., float(p)))
+    learn, guess, slip = (params or (P_LEARN, P_GUESS, P_SLIP))
+    num = p * ((1-slip) if verno else slip)
+    den = num + (1-p) * (guess if verno else (1-guess))
+    post = num / den if den else p
+    return post + (1-post) * learn
 
-
-def obnovit(p: float, verno: bool) -> float:
-    """Один шаг BKT: апостериорная вероятность, затем переход обучения."""
-    if verno:
-        post = p * (1 - P_SLIP) / (p * (1 - P_SLIP) + (1 - p) * P_GUESS)
-    else:
-        post = p * P_SLIP / (p * P_SLIP + (1 - p) * (1 - P_GUESS))
-    return post + (1 - post) * P_LEARN
-
-
-def do_osvoeniya(p: float) -> int:
-    """
-    Сколько ещё успешных попыток нужно до порога освоения.
-    Прямое следствие модели: считаем шаги обновления при верных ответах.
-    """
+def do_osvoeniya(p):
     n = 0
     while p < MASTERY and n < 60:
         p = obnovit(p, True)
         n += 1
     return n
 
-
-def profil(uid: int) -> dict[str, dict]:
-    rows = db.q("SELECT skill,p,n FROM bkt WHERE user_id=?", (uid,))
-    have = {r["skill"]: r for r in rows}
+def profil(uid, kind="ops112"):
+    if kind not in PROGRAMS:
+        raise ValueError("Unknown programme")
+    have = {r["skill"]: r for r in db.q("SELECT skill,p,n FROM bkt WHERE user_id=?", (uid,))}
     out = {}
-    for sk in set(FAKT_NAVYK.values()):
-        r = have.get(sk)
-        p = r["p"] if r else P_INIT
-        out[sk] = {"p": round(p, 3), "n": r["n"] if r else 0,
-                   "osvoen": p >= MASTERY, "ostalos": do_osvoeniya(p)}
+    for skill in PROGRAMS[kind]:
+        r = have.get(kind + ":" + skill)
+        p, n = (float(r["p"]), int(r["n"])) if r else (P_INIT, 0)
+        out[skill] = {"p": round(p, 6), "n": n, "osvoen": n > 0 and p >= MASTERY,
+                      "status": "not_observed" if not n else ("mastered" if p >= MASTERY else "practice"),
+                      "ostalos": do_osvoeniya(p) if n else None}
     return out
 
-
-def primenit(uid: int, fakty: list[dict]) -> dict[str, dict]:
-    """Обновить профиль по фактам одного вызова."""
-    prof = profil(uid)
+def primenit(uid, fakty, kind="ops112"):
+    observations = {}
     for f in fakty:
-        sk = FAKT_NAVYK.get(f["kod"])
-        if not sk:
-            continue
-        p0 = prof[sk]["p"]
-        p1 = obnovit(p0, bool(f["proyden"]))
-        n1 = prof[sk]["n"] + 1
+        skill = FAKT_SKILL.get(f["kod"])
+        if skill in PROGRAMS[kind] and f.get("proyden") is not None:
+            observations.setdefault(skill, []).append(bool(f["proyden"]))
+    have = {r["skill"]: r for r in db.q("SELECT skill,p,n FROM bkt WHERE user_id=?", (uid,))}
+    for skill, values in observations.items():
+        key = kind + ":" + skill
+        old = have.get(key, {"p": P_INIT, "n": 0})
+        p = obnovit(old["p"], all(values))
         db.ex("INSERT INTO bkt(user_id,skill,p,n,updated) VALUES(?,?,?,?,?) "
-              "ON CONFLICT(user_id,skill) DO UPDATE SET p=excluded.p,n=excluded.n,"
-              "updated=excluded.updated", (uid, sk, p1, n1, time.time()))
-    return profil(uid)
+              "ON CONFLICT(user_id,skill) DO UPDATE SET p=excluded.p,n=excluded.n,updated=excluded.updated",
+              (uid, key, p, old["n"]+1, time.time()))
+    return profil(uid, kind)
 
-
-def prognoz_attestacii(uid: int) -> dict:
-    """
-    Прогноз: сколько вызовов до освоения всех навыков.
-    Лимитирует самый слабый навык.
-    """
-    prof = profil(uid)
-    slabyy = min(prof.items(), key=lambda kv: kv[1]["p"])
-    vyzovov = max(v["ostalos"] for v in prof.values())
-    return {
-        "vyzovov_do_attestacii": vyzovov,
-        "limitiruyushchiy_navyk": slabyy[0],
-        "p_limit": slabyy[1]["p"],
-        "vse_osvoeny": all(v["osvoen"] for v in prof.values()),
-        "parametry": {"P_INIT": P_INIT, "P_LEARN": P_LEARN,
-                      "P_GUESS": P_GUESS, "P_SLIP": P_SLIP, "MASTERY": MASTERY},
-        "model": "Bayesian Knowledge Tracing (Corbett & Anderson, 1994)",
-    }
+def prognoz_attestacii(uid, kind="ops112"):
+    profile = profil(uid, kind)
+    unknown = [k for k,v in profile.items() if not v["n"]]
+    weak = min(profile, key=lambda k: profile[k]["p"])
+    return {"kind": kind, "vyzovov_do_attestacii": None if unknown else max(v["ostalos"] for v in profile.values()),
+            "limitiruyushchiy_navyk": weak, "p_limit": profile[weak]["p"],
+            "vse_osvoeny": all(v["osvoen"] for v in profile.values()), "ne_provereny": unknown,
+            "forecast_type": "conditional_best_case", "certification": False,
+            "explanation": "Условное число успешных повторений каждого навыка; не число вызовов и не допуск к работе",
+            "parametry": {"P_INIT":P_INIT,"P_LEARN":P_LEARN,"P_GUESS":P_GUESS,"P_SLIP":P_SLIP,"MASTERY":MASTERY},
+            "model": "BKT baseline v2, parameters not fitted"}
