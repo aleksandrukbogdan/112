@@ -168,6 +168,11 @@ def get_cached_ref(voice_id: str, voices_catalog: Dict[str, Any]):
             ref_text = "Здравствуйте, слушаю вас."
 
     if ref_audio_path and Path(ref_audio_path).exists():
+        from .ref_fit import fit_ref_text
+        try:
+            ref_text = fit_ref_text(ref_text, float(sf.info(ref_audio_path).duration))
+        except Exception:
+            ref_text = fit_ref_text(ref_text, 12.0)
         ref_audio, ref_text_processed = preprocess_ref_audio_text(ref_audio_path, ref_text)
         _REF_CACHE[voice_id] = (ref_audio, ref_text_processed)
         return ref_audio, ref_text_processed
@@ -181,6 +186,57 @@ _VOICE_ID = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
 def invalidate_voice(voice_id: str) -> None:
     _REF_CACHE.pop(voice_id, None)
+
+
+def _catalog_path() -> Path:
+    return VOICES_DIR / "voices.json"
+
+
+def _read_catalog_locked() -> tuple[Path, dict]:
+    """Каталог на диске. Если файла ещё нет — копия семи встроенных, чтобы правка не исчезла."""
+    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _catalog_path()
+    if not dest.exists():
+        baked = Path(__file__).resolve().parent / "voices_f5.json"
+        catalog = json.loads(baked.read_text(encoding="utf-8")) if baked.exists() else {}
+        dest.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        catalog = json.loads(dest.read_text(encoding="utf-8"))
+    return dest, catalog
+
+
+def rename_voice(voice_id: str, voice_name: str) -> Dict[str, Any]:
+    if not _VOICE_ID.match(voice_id or ""):
+        raise ValueError("неизвестный голос")
+    title = re.sub(r"\s+", " ", (voice_name or "")).strip()[:80]
+    if len(title) < 1:
+        raise ValueError("пустое имя")
+    with _VOICE_IO:
+        dest, catalog = _read_catalog_locked()
+        if voice_id not in catalog:
+            raise ValueError("такого голоса нет")
+        catalog[voice_id]["name"] = title
+        dest.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+        invalidate_voice(voice_id)
+    return {"voice_id": voice_id, "voice_name": title}
+
+
+def delete_voice(voice_id: str) -> None:
+    if not _VOICE_ID.match(voice_id or ""):
+        raise ValueError("неизвестный голос")
+    with _VOICE_IO:
+        dest, catalog = _read_catalog_locked()
+        info = catalog.get(voice_id)
+        if not info:
+            raise ValueError("такого голоса нет")
+        wav = info.get("wav") or ""
+        del catalog[voice_id]
+        dest.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+        invalidate_voice(voice_id)
+        if wav and not any(x in wav for x in ("/", "\\", "..")):
+            path = (VOICES_DIR / wav).resolve()
+            if path.parent == VOICES_DIR.resolve() and path.is_file():
+                path.unlink()
 
 
 def voice_wav_path(voice_id: str) -> Optional[Path]:

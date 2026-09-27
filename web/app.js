@@ -906,7 +906,8 @@ async function viewAudit(v) {
     scenario_published: "сценарий утверждён", scenario_rejected: "сценарий отклонён", assign: "назначение", assign_delete: "снятие назначения",
     user_create: "создан пользователь", user_edit: "изменён пользователь", group_create: "создана группа", backup: "резервная копия",
     settings: "настройки", password_change: "смена пароля", voice_select: "выбор голоса",
-    voice_upload: "загрузка голоса" };
+    voice_upload: "загрузка голоса", voice_rename: "переименование голоса",
+    voice_delete: "удаление голоса", voice_binds: "привязка голоса и звука" };
   v.innerHTML = `<div class="card"><h2>Журнал аудита <span class="badge b-dim">${a.length}</span></h2>
     <table class="t"><tr><th>Время</th><th>Пользователь</th><th>Действие</th><th>Подробности</th></tr>
     ${a.map(x => `<tr><td>${fmtT(x.ts)}</td><td class="mono">${esc(x.login)}</td>
@@ -949,24 +950,44 @@ let voiceBlob = null;
 let voiceRec = null;
 
 async function viewVoices(v) {
-  const d = await api("/api/admin/voices");
+  const [d, board] = await Promise.all([
+    api("/api/admin/voices"),
+    api("/api/admin/voices/board"),
+  ]);
   const selected = d.selected || "auto";
-  const rows = d.voices.map(x => `<tr>
+  const voices = d.voices || [];
+  const rows = voices.map(x => `<tr>
     <td><label class="row" style="gap:8px;align-items:flex-start">
       <input type="radio" name="cv" value="${esc(x.id)}" ${x.id === selected ? "checked" : ""}>
       <span><b>${esc(x.name)}</b><br><span class="muted">${esc(x.text)}</span></span></label></td>
     <td class="row" style="gap:4px;white-space:nowrap">
-      <button class="btn btn-g btn-sm" ${x.has_audio ? "" : "disabled"} onclick="playVoiceFile('${esc(x.id)}')">Эталон</button>
-      <button class="btn btn-g btn-sm" onclick="playVoiceSample('${esc(x.id)}')">Фраза</button>
+      <button class="btn btn-g btn-sm" ${x.has_audio ? "" : "disabled"} data-play="${esc(x.id)}">Эталон</button>
+      <button class="btn btn-g btn-sm" data-sample="${esc(x.id)}">Фраза</button>
+      <button class="btn btn-g btn-sm" data-rename="${esc(x.id)}" data-name="${esc(x.name)}">Имя</button>
+      <button class="btn btn-g btn-sm" data-del="${esc(x.id)}" data-name="${esc(x.name)}">Удалить</button>
     </td></tr>`).join("");
+  const voiceOpts = (cur) => `<option value="" ${cur ? "" : "selected"}>Как в общем выборе</option>
+      <option value="auto" ${cur === "auto" ? "selected" : ""}>Авто по билету</option>`
+    + voices.map(x => `<option value="${esc(x.id)}" ${x.id === cur ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+  const soundOpts = (cur) => `<option value="" ${cur ? "" : "selected"}>Авто</option>
+      <option value="none" ${cur === "none" ? "selected" : ""}>Без звука</option>`
+    + (board.sounds || []).map(s => `<option value="${esc(s.id)}" ${s.id === cur ? "selected" : ""}>${esc(s.title || s.id)}</option>`).join("")
+    + (cur && cur !== "none" && !(board.sounds || []).some(s => s.id === cur)
+      ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : "");
+  const calls = (board.calls || []).map(c => `<tr data-call="${esc(c.id)}" data-find="${esc((c.bilet + " " + c.vyzov + " " + c.situaciya + " " + (c.auto_sound || "")).toLowerCase())}">
+    <td class="mono">${esc(c.bilet)}.${esc(c.vyzov)}</td>
+    <td>${esc(c.situaciya)}<div class="muted">авто: ${esc(c.auto_sound || "без звука")}</div></td>
+    <td><select class="bv">${voiceOpts(c.voice || "")}</select></td>
+    <td><select class="bs">${soundOpts(c.sound || "")}</select></td>
+  </tr>`).join("");
   v.innerHTML = `<div class="grid g2">
     <div class="card"><h2>Голос заявителя в билетах</h2>
-      <div class="hint" style="margin-top:0">Один тембр на весь звонок. Фон и волнение по-прежнему зависят от билета: пожар, ДТП, плач ребёнка.</div>
+      <div class="hint" style="margin-top:0">Общий тембр на все вызовы, если у вызова нет своей привязки. Ученик слышит только текст из чата, эталон задаёт голос, не слова.</div>
       <label class="row" style="gap:8px;margin:12px 0"><input type="radio" name="cv" value="auto" ${selected === "auto" ? "checked" : ""}>
         <span><b>Авто по билету</b><br><span class="muted">Пол и эмоция из ситуации, без смены голоса между ответами</span></span></label>
       <table class="t"><tr><th>Эталон</th><th></th></tr>
         ${rows || `<tr><td colspan="2" class="muted">Каталог пуст</td></tr>`}</table>
-      <button class="btn" style="margin-top:12px" onclick="voiceSelect()">Сохранить выбор</button>
+      <button class="btn" style="margin-top:12px" id="vsel">Сохранить выбор</button>
     </div>
     <div class="card"><h2>Свой голос</h2>
       <div class="hint" style="margin-top:0">Запись с микрофона или файл, как на стенде. Фраза 3–5 секунд. Текст должен совпадать с тем, что сказано: по нему копируется тембр.</div>
@@ -979,11 +1000,33 @@ async function viewVoices(v) {
         <input id="vfile" type="file" accept="audio/*,.wav,.webm,.mp3,.ogg" hidden>
       </div>
       <div class="hint" id="vstat">Микрофон пишет 3–5 секунд. После записи голос появится в списке слева.</div>
-    </div></div>`;
+    </div></div>
+    <div class="card" style="margin-top:16px"><h2>Голос и звук по вызову</h2>
+      <div class="hint" style="margin-top:0">Пустой выбор голоса — общий переключатель слева. «Авто» у звука — правило билета, подпись под текстом. Свой звук заменяет фон только у этого вызова.</div>
+      <div class="fld" style="margin-top:12px"><label>Найти</label><input id="vfind" placeholder="номер или слова из ситуации"></div>
+      <table class="t"><tr><th>Вызов</th><th>Ситуация</th><th>Голос</th><th>Звук</th></tr>
+        ${calls || `<tr><td colspan="4" class="muted">Нет билетов</td></tr>`}</table>
+      <button class="btn" style="margin-top:12px" id="vbinds">Сохранить привязки</button>
+    </div>`;
   $("#vfile").onchange = () => {
     const f = $("#vfile").files && $("#vfile").files[0];
     if (f) voiceUpload(f, $("#vname").value, f.name);
   };
+  const bind = $("#vbinds");
+  if (bind) bind.onclick = voiceBindsSave;
+  const sel = $("#vsel");
+  if (sel) sel.onclick = voiceSelect;
+  const find = $("#vfind");
+  if (find) find.oninput = () => {
+    const q = find.value.trim().toLowerCase();
+    v.querySelectorAll("tr[data-call]").forEach(tr => {
+      tr.style.display = !q || (tr.dataset.find || "").includes(q) ? "" : "none";
+    });
+  };
+  v.querySelectorAll("[data-play]").forEach(b => { b.onclick = () => playVoiceFile(b.dataset.play); });
+  v.querySelectorAll("[data-sample]").forEach(b => { b.onclick = () => playVoiceSample(b.dataset.sample); });
+  v.querySelectorAll("[data-rename]").forEach(b => { b.onclick = () => voiceRename(b.dataset.rename, b.dataset.name); });
+  v.querySelectorAll("[data-del]").forEach(b => { b.onclick = () => voiceDelete(b.dataset.del, b.dataset.name); });
 }
 
 function playVoiceFile(id) {
@@ -999,6 +1042,36 @@ async function voiceSelect() {
   try {
     await api("/api/admin/voices/select", { voice_id: picked.value });
     toast("Голос для билетов сохранён", "ok");
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function voiceRename(id, current) {
+  const name = prompt("Название голоса", current || "");
+  if (name == null) return;
+  const title = name.trim();
+  if (!title) { toast("Пустое имя", "bad"); return; }
+  try {
+    await api("/api/admin/voices/" + encodeURIComponent(id), { name: title }, "PATCH");
+    toast("Название сохранено", "ok");
+    go("voices");
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function voiceDelete(id, name) {
+  if (!confirm("Удалить голос «" + (name || id) + "»? Привязки к нему станут авто.")) return;
+  try {
+    await api("/api/admin/voices/" + encodeURIComponent(id), undefined, "DELETE");
+    toast("Голос удалён", "ok");
+    go("voices");
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function voiceBindsSave() {
+  const items = [...document.querySelectorAll("tr[data-call]")].map(tr => ({
+    id: tr.dataset.call,
+    voice: (tr.querySelector(".bv") || {}).value || "",
+    sound: (tr.querySelector(".bs") || {}).value || "",
+  }));
+  try {
+    const r = await api("/api/admin/voices/binds", { items });
+    toast(`Привязки сохранены: голосов ${r.voices}, звуков ${r.sounds}`, "ok");
   } catch (e) { toast(e.message, "bad"); }
 }
 async function voiceToggleRec() {

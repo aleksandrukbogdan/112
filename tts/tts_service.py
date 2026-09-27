@@ -14,6 +14,7 @@ import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from .scene import ScenePlan, classify
 
@@ -34,14 +35,14 @@ def _stable_gen_id() -> int:
 
 def render_reply(text: str, keep: bool = False, *, situaciya: str = "", fio: str = "",
                  gruppa: str = "", turn: int = 0, voice: str = "",
-                 call_id: str = "", plain: bool = False) -> tuple[bytes, dict]:
+                 call_id: str = "", plain: bool = False, sound: str = "") -> tuple[bytes, dict]:
     if plain:
         spoken = re.sub(r"\s+", " ", (text or "")).strip()
         plan = ScenePlan(voice or "female_warm", spoken, None, 0.0, True, "plain", False)
     else:
         plan = classify(
             text, situaciya=situaciya, fio=fio, gruppa=gruppa,
-            turn=turn, voice=voice, call_id=call_id,
+            turn=turn, voice=voice, call_id=call_id, sound=sound,
         )
     from .f5_engine import OUTPUTS_DIR, synthesize_f5_fast
 
@@ -116,7 +117,8 @@ def health():
 
 @app.get("/tts")
 def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
-        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0):
+        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0,
+        sound: str = ""):
     text = (text or "").strip()[:600]
     if not text:
         raise HTTPException(400, "пустой текст")
@@ -124,7 +126,7 @@ def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
         data, _meta = render_reply(
             text, keep=False, situaciya=situaciya[:800], fio=fio[:120],
             gruppa=str(gruppa)[:8], turn=turn, voice=voice[:64],
-            call_id=call_id[:80], plain=bool(plain),
+            call_id=call_id[:80], plain=bool(plain), sound=sound[:64],
         )
     except Exception as exc:
         raise HTTPException(500, f"синтез не удался: {exc}") from exc
@@ -170,3 +172,55 @@ async def voice_upload(file: UploadFile = File(...), text: str = Form(""), voice
     except OSError as exc:
         raise HTTPException(500, f"не удалось записать голос: {exc}") from exc
     return saved
+
+
+class _Rename(BaseModel):
+    name: str = ""
+
+
+class _Classify(BaseModel):
+    items: list[dict] = []
+
+
+@app.patch("/voices/{voice_id}")
+def voice_rename(voice_id: str, body: _Rename):
+    from .f5_engine import rename_voice
+    try:
+        return rename_voice(voice_id, body.name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/voices/{voice_id}")
+def voice_delete(voice_id: str):
+    from .f5_engine import delete_voice
+    try:
+        delete_voice(voice_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/sounds")
+def sounds():
+    from .sound_manager import scan_sound_files
+    return {"sounds": [{"id": s["id"], "title": s["title"]} for s in scan_sound_files()]}
+
+
+@app.post("/classify")
+def classify_calls(body: _Classify):
+    out = []
+    for it in (body.items or [])[:120]:
+        plan = classify(
+            "Алло.",
+            situaciya=str(it.get("situaciya") or "")[:800],
+            fio=str(it.get("fio") or "")[:120],
+            gruppa=str(it.get("gruppa") or "")[:8],
+            turn=1,
+        )
+        out.append({
+            "id": str(it.get("id") or ""),
+            "scene": plan.scene,
+            "sound": plan.sound_track or "",
+        })
+    return {"items": out}

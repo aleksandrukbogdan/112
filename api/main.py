@@ -1079,14 +1079,44 @@ def _ticket_params(s: dict, text: str) -> dict:
         "turn": _caller_turn(s, text),
         "call_id": s.get("id") or "",
     }
-    chosen = db.setting("caller_voice", "auto") or "auto"
-    if isinstance(chosen, str) and chosen not in ("", "auto"):
-        params["voice"] = chosen
+    bid = str(bil.get("id") or "")
+    voice_binds = db.setting("voice_binds", {}) or {}
+    sound_binds = db.setting("sound_binds", {}) or {}
+    if not isinstance(voice_binds, dict):
+        voice_binds = {}
+    if not isinstance(sound_binds, dict):
+        sound_binds = {}
+    pinned = voice_binds.get(bid)
+    if pinned == "auto":
+        pass
+    elif isinstance(pinned, str) and pinned not in ("", "inherit"):
+        params["voice"] = pinned
+    else:
+        chosen = db.setting("caller_voice", "auto") or "auto"
+        if isinstance(chosen, str) and chosen not in ("", "auto"):
+            params["voice"] = chosen
+    sound = sound_binds.get(bid)
+    if isinstance(sound, str) and sound not in ("", "auto"):
+        params["sound"] = sound
     return params
 
 
 class VoiceChoice(BaseModel):
     voice_id: str
+
+
+class VoiceName(BaseModel):
+    name: str = ""
+
+
+class VoiceBind(BaseModel):
+    id: str
+    voice: str = ""
+    sound: str = ""
+
+
+class VoiceBinds(BaseModel):
+    items: list[VoiceBind] = []
 
 
 @app.get("/api/admin/voices")
@@ -1161,6 +1191,136 @@ async def admin_voice_upload(file: UploadFile = File(...), text: str = Form(""),
     saved = r.json()
     db.audit(u, "voice_upload", {"voice": saved.get("voice_id"), "name": saved.get("voice_name")})
     return saved
+
+
+def _drop_voice_binds(vid: str) -> None:
+    binds = db.setting("voice_binds", {}) or {}
+    if not isinstance(binds, dict):
+        return
+    left = {k: v for k, v in binds.items() if v != vid}
+    if left != binds:
+        db.set_setting("voice_binds", left)
+
+
+@app.patch("/api/admin/voices/{voice_id}")
+async def admin_voice_rename(voice_id: str, b: VoiceName, u=Depends(role("admin"))):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    try:
+        async with httpx.AsyncClient(timeout=15) as cl:
+            r = await cl.patch(f"{VOICE_URL}/voices/{voice_id}", json={"name": b.name})
+    except Exception:
+        raise HTTPException(503, "каталог голосов недоступен")
+    if r.status_code >= 400:
+        detail = "не удалось переименовать"
+        try:
+            detail = r.json().get("detail", detail)
+        except Exception:
+            pass
+        raise HTTPException(r.status_code, detail)
+    saved = r.json()
+    db.audit(u, "voice_rename", {"voice": voice_id, "name": saved.get("voice_name")})
+    return saved
+
+
+@app.delete("/api/admin/voices/{voice_id}")
+async def admin_voice_delete(voice_id: str, u=Depends(role("admin"))):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    try:
+        async with httpx.AsyncClient(timeout=15) as cl:
+            r = await cl.delete(f"{VOICE_URL}/voices/{voice_id}")
+    except Exception:
+        raise HTTPException(503, "каталог голосов недоступен")
+    if r.status_code >= 400:
+        detail = "не удалось удалить"
+        try:
+            detail = r.json().get("detail", detail)
+        except Exception:
+            pass
+        raise HTTPException(r.status_code, detail)
+    if (db.setting("caller_voice", "auto") or "auto") == voice_id:
+        db.set_setting("caller_voice", "auto")
+    _drop_voice_binds(voice_id)
+    db.audit(u, "voice_delete", {"voice": voice_id})
+    return {"ok": True}
+
+
+@app.get("/api/admin/voices/board")
+async def admin_voice_board(u=Depends(role("admin"))):
+    calls = []
+    for b in C.load("bilety"):
+        z = b.get("zayavitel") or {}
+        calls.append({
+            "id": b.get("id") or "",
+            "bilet": b.get("bilet"),
+            "vyzov": b.get("vyzov"),
+            "situaciya": (b.get("situaciya") or "")[:180],
+            "fio": z.get("fio") or "",
+            "gruppa": str(b.get("gruppa") or ""),
+        })
+    auto: dict[str, str] = {}
+    sounds: list = []
+    try:
+        async with httpx.AsyncClient(timeout=25) as cl:
+            r = await cl.post(f"{VOICE_URL}/classify", json={"items": calls})
+            if r.status_code == 200:
+                for it in r.json().get("items", []):
+                    auto[str(it.get("id") or "")] = it.get("sound") or ""
+            s = await cl.get(f"{VOICE_URL}/sounds")
+            if s.status_code == 200:
+                sounds = s.json().get("sounds", [])
+    except Exception:
+        pass
+    voice_binds = db.setting("voice_binds", {}) or {}
+    sound_binds = db.setting("sound_binds", {}) or {}
+    if not isinstance(voice_binds, dict):
+        voice_binds = {}
+    if not isinstance(sound_binds, dict):
+        sound_binds = {}
+    out = []
+    for c in calls:
+        out.append({
+            "id": c["id"],
+            "bilet": c["bilet"],
+            "vyzov": c["vyzov"],
+            "situaciya": c["situaciya"],
+            "auto_sound": auto.get(c["id"], ""),
+            "voice": voice_binds.get(c["id"], ""),
+            "sound": sound_binds.get(c["id"], ""),
+        })
+    return {"sounds": sounds, "calls": out}
+
+
+@app.post("/api/admin/voices/binds")
+async def admin_voice_binds(b: VoiceBinds, u=Depends(role("admin"))):
+    known = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.get(f"{VOICE_URL}/voices")
+            if r.status_code == 200:
+                known = {v.get("id") for v in r.json().get("voices", [])}
+    except Exception:
+        known = None
+    voice_binds: dict[str, str] = {}
+    sound_binds: dict[str, str] = {}
+    for it in b.items:
+        if not re.fullmatch(r"b\d\d_v\d", it.id or ""):
+            continue
+        voice = (it.voice or "").strip()
+        if voice == "auto":
+            voice_binds[it.id] = "auto"
+        elif voice and re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice) and (known is None or voice in known):
+            voice_binds[it.id] = voice
+        sound = (it.sound or "").strip()
+        if sound == "none":
+            sound_binds[it.id] = "none"
+        elif sound and sound != "auto" and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sound):
+            sound_binds[it.id] = sound
+    db.set_setting("voice_binds", voice_binds)
+    db.set_setting("sound_binds", sound_binds)
+    db.audit(u, "voice_binds", {"voices": len(voice_binds), "sounds": len(sound_binds)})
+    return {"ok": True, "voices": len(voice_binds), "sounds": len(sound_binds)}
 
 
 @app.post("/api/voice/asr")

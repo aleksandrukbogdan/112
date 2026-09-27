@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tts.ref_fit import fit_ref_text
 from tts.scene import classify
 
 
@@ -235,3 +236,30 @@ def test_brigade_stays_clean_and_override_keeps_bed():
     assert pinned.voice == "female_warm"
     assert pinned.sound_track == "fire_inferno"
     assert pinned.text.startswith("#пожар ")
+
+
+def test_ref_text_is_cut_to_the_recording():
+    short = "Здравствуйте, слушаю вас."
+    assert fit_ref_text(short, 5) == short
+    long = "Посмотрите на них, ну что они могут? Сидят в кабинетах, бумажки перекладывают, а страна ждёт решительных действий!"
+    fitted = fit_ref_text(long, 3)
+    assert len(fitted) < len(long)
+    assert "страна" not in fitted
+    assert fitted.endswith(".")
+
+
+def test_sound_bind_replaces_bed_without_fire_tag():
+    forced = classify(
+        "Квартира 45.",
+        situaciya="Открыть дверь в квартиру. В квартире проживает пожилой инвалид, не открывает дверь",
+        fio="Иванова Елена Сергеевна", gruppa="17", turn=1, sound="dog_bark",
+    )
+    assert forced.sound_track == "dog_bark"
+    assert "#" not in forced.text
+    silent = classify(
+        "Горит балкон.",
+        situaciya="Горит балкон",
+        fio="Сидорова Анна", gruppa="1", turn=1, sound="none",
+    )
+    assert silent.sound_track is None
+    assert "#пожар" not in silent.text

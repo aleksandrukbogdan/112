@@ -15,7 +15,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 TTL_SEC = 90.0
 
@@ -325,13 +325,25 @@ def _event(kind: str, sticky: dict | None) -> str | None:
     return None
 
 
+def _force_sound(plan: ScenePlan, sound: str) -> ScenePlan:
+    """Явная дорожка из админки. Чужие хэштеги не подмешивают другой фон."""
+    forced = (sound or "").strip()
+    if forced in ("", "auto"):
+        return plan
+    text = re.sub(r"#[0-9A-Za-zА-Яа-яЁё_]+", " ", plan.text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if forced == "none":
+        return replace(plan, text=text, sound_track=None, sound_volume=0.0)
+    return replace(plan, text=text, sound_track=forced, sound_volume=_volume(forced, ""))
+
+
 def classify(text: str, *, situaciya: str = "", fio: str = "", gruppa: str = "",
-             turn: int = 0, voice: str = "", call_id: str = "") -> ScenePlan:
+             turn: int = 0, voice: str = "", call_id: str = "", sound: str = "") -> ScenePlan:
     raw = re.sub(r"\s+", " ", (text or "")).strip()
     # call_id различает занятия на стороне API; сцена полностью задаётся билетом и номером реплики.
     _ = call_id
     if (situaciya or "").strip() or str(gruppa or "").strip():
-        return _from_ticket(raw, situaciya, fio, gruppa, turn, voice)
+        return _force_sound(_from_ticket(raw, situaciya, fio, gruppa, turn, voice), sound)
     return _from_utterance(raw)
 
 

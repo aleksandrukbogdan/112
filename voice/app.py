@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 import wave
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 VOSK_MODEL = os.environ.get("VOSK_MODEL", "/models/vosk")
@@ -131,13 +131,15 @@ def _f5_call(method: str, path: str, data: bytes | None = None, headers: dict | 
 
 @app.get("/tts")
 def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
-        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0):
+        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0,
+        sound: str = ""):
     text = (text or "").strip()[:600]
     if not text:
         raise HTTPException(400, "пустой текст")
     data = _f5({
         "text": text, "situaciya": situaciya, "fio": fio, "gruppa": gruppa,
         "turn": turn, "voice": voice, "call_id": call_id, "plain": plain or "",
+        "sound": sound,
     })
     if data is None:
         if not os.path.exists(PIPER_MODEL):
@@ -188,3 +190,34 @@ async def voices_save(file: UploadFile = File(...), text: str = Form(""), voice_
     )
     data, _ = _f5_call("POST", "/voices", data=body, headers={"Content-Type": ctype}, timeout=40)
     return Response(data, media_type="application/json")
+
+
+def _json_call(method: str, path: str, payload: dict | None = None):
+    raw = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
+    headers = {"Content-Type": "application/json"} if raw is not None else None
+    data, _ctype = _f5_call(method, path, data=raw, headers=headers, timeout=20)
+    return Response(data, media_type="application/json")
+
+
+@app.get("/sounds")
+def sounds():
+    return _json_call("GET", "/sounds")
+
+
+@app.post("/classify")
+async def classify_calls(payload: dict = Body(...)):
+    return _json_call("POST", "/classify", payload)
+
+
+@app.patch("/voices/{voice_id}")
+def voice_rename(voice_id: str, payload: dict = Body(...)):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    return _json_call("PATCH", "/voices/" + urllib.parse.quote(voice_id), payload)
+
+
+@app.delete("/voices/{voice_id}")
+def voice_delete(voice_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    return _json_call("DELETE", "/voices/" + urllib.parse.quote(voice_id))
