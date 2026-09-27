@@ -393,6 +393,9 @@ def parse_f5_tags(text: str) -> Dict[str, Any]:
             sound_track = "siren_distant"
             ambience = "siren"
 
+        elif hl in ["река", "фон_река", "stream-river-water", "river"]:
+            sound_track = "stream-river-water"
+
         elif hl.startswith("звук_") or hl.startswith("фон_"):
             cand_track = hl.replace("звук_", "").replace("фон_", "")
             if cand_track:
@@ -858,7 +861,12 @@ def synthesize_f5_fast(
 
             # 6. Фон катастрофы (безопасное точное смешивание равной длины)
             chosen_sound = sound_track if (sound_track and sound_track != "none") else tag_info.get("sound_track")
-            real_ambiences = {"fire_inferno", "traffic_highway", "siren_distant"}
+            real_ambiences = {
+                "fire_inferno", "traffic_highway", "siren_distant",
+                "stream-river-water", "cough_smoke", "woman_crying",
+                "smoke_detector", "heavy_breathing", "child_crying",
+                "car_crash", "dog_bark", "door_slam",
+            }
             
             # Процедурный шум генерируем только если нет реального аудиотрека этой же катастрофы
             if tag_info["ambience"] != "none" and (chosen_sound not in real_ambiences):

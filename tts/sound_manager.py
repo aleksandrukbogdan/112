@@ -126,6 +126,15 @@ SOUND_METADATA: Dict[str, Dict[str, Any]] = {
         "tags": ["#собака", "#лай", "#нападение_собаки"],
         "aliases": ["dog", "dog_bark", "собака", "лай", "нападение_собаки"]
     },
+    "stream-river-water": {
+        "title": "🌊 Река / течение воды",
+        "category": "catastrophe",
+        "category_title": "Атмосферы катастроф",
+        "default_filter": "distance",
+        "default_volume": 0.26,
+        "tags": ["#река", "#вода", "#фон_река"],
+        "aliases": ["stream-river-water", "river", "река", "фон_река"]
+    },
 }
 
 # Кэш предзагруженных и приведенных к 24 кГц аудиодорожек
