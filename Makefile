@@ -71,7 +71,7 @@ health:
 	l=d['llm']; print('  Модель ......... ' + ('работает' if l.get('ok') else 'выключена' if l.get('ok') is None else 'НЕДОСТУПНА — ' + str(l.get('note') or l.get('error','')))); \
 	v=d['voice']; g=v.get('gigaam') or {}; \
 	print('  Распознавание .. ' + ('GigaAM на ' + str(g.get('device')) + ((' · ' + str(g.get('gpu'))) if g.get('gpu') else '') if v.get('engine')=='gigaam' else 'Vosk (CPU)' if v.get('engine')=='vosk' else 'не запущено')); \
-	print('  Синтез речи .... ' + ('Piper' if v.get('tts') else 'не запущен')); \
+	print('  Синтез речи .... ' + ('F5-TTS' if v.get('tts') else 'не запущен')); \
 	(v.get('note') and print('  Примечание ..... ' + v['note'])); \
 	s=d['svodka']; print('  Данные ......... классификатор v%s (%s поз.), %s вызовов, %s служб' % (s['klassifikator']['versiya'],s['klassifikator']['poziciy'],s['bilety']['vsego'],s.get('sluzhb'))); print('')" \
 	|| (echo "  Приложение не отвечает: make logs"; exit 1)

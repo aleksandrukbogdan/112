@@ -24,3 +24,6 @@ venv/
 old/
 112_patch_bundle.zip
 .pytest_cache/
+voice/Sound/
+voice/Voices/
+tts/outputs/

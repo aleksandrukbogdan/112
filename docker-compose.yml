@@ -53,12 +53,48 @@ services:
       - "host.docker.internal:host-gateway"
 
   # ---------------------------------------------------------------- голос, CPU
-  # Vosk — запасное распознавание, Piper — голос заявителя и собеседников.
+  # Vosk — запасное распознавание. Синтез: F5, если контейнер tts жив, иначе Piper.
   voice:
     build: ./voice
     image: t112-voice
     container_name: t112-voice
     restart: unless-stopped
+    environment:
+      F5_URL: ${F5_URL:-http://tts:8092}
+
+  # ---------------------------------------------------------------- синтез F5, GPU 1
+  # Карта 0 занята vLLM. Веса, звуки и голоса уже лежат на диске сервера и в git не входят.
+  tts:
+    profiles: ["gpu"]
+    build:
+      context: ./tts
+      dockerfile: Dockerfile
+    image: t112-f5
+    container_name: t112-f5
+    restart: unless-stopped
+    environment:
+      HF_HOME: /hf
+      HUGGINGFACE_HUB_CACHE: /hf
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SOUND_DIR: /sounds
+      VOICES_DIR: /voices
+      F5_MODEL_DIR: /models/F5-TTS_RUSSIAN
+      F5_CKPT: /models/F5-TTS_RUSSIAN/F5TTS_v1_Base_v4_winter/model_212000.safetensors
+      F5_VOCAB: /models/F5-TTS_RUSSIAN/F5TTS_v1_Base/vocab.txt
+      F5_NFE_STEP: ${F5_NFE_STEP:-12}
+    volumes:
+      - ${F5_MODEL_DIR:-/data/models/F5-TTS_RUSSIAN}:/models/F5-TTS_RUSSIAN:ro
+      - ${F5_HF_HOME:-/data/models}:/hf:ro
+      - ${F5_SOUND_DIR:-/data/112/voice/Sound}:/sounds:ro
+      - ${F5_VOICES_DIR:-/data/112/voice/Voices}:/voices:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${F5_GPU:-1}"]
+              capabilities: [gpu]
 
   # ---------------------------------------------------------------- распознавание, GPU
   # GigaAM v3 — основной движок. Карта — ASR_GPU, НЕ та, где vLLM.

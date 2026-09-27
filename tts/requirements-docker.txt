@@ -1,0 +1,25 @@
+# torch и torchaudio уже стоят в базовом образе. f5-tts ставится отдельно с --no-deps,
+# иначе pip подменит сборку CUDA.
+einops
+accelerate>=0.33.0
+cached_path
+click
+ema_pytorch
+hydra-core
+librosa
+matplotlib
+pydub
+pypinyin
+safetensors
+soundfile
+tomli
+tqdm
+transformers
+vocos
+x-transformers
+torchdiffeq
+huggingface_hub
+scipy
+numpy<2
+fastapi==0.115.6
+uvicorn==0.34.0

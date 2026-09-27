@@ -855,7 +855,7 @@ async function viewSystem(v) {
     ${s.llm.note ? `<tr><td colspan="2" class="muted">${esc(s.llm.note)}</td></tr>` : ""}
     <tr><td>Распознавание: GigaAM v3 (GPU)${s.voice.gigaam?.gpu ? " · " + esc(s.voice.gigaam.gpu) : ""}</td><td>${ok(!!s.voice.gigaam?.ok)}</td></tr>
     <tr><td>Распознавание: Vosk (CPU, запасной)</td><td>${ok(!!s.voice.vosk)}</td></tr>
-    <tr><td>Синтез речи: Piper</td><td>${ok(!!s.voice.tts)}</td></tr>
+    <tr><td>Синтез речи: F5-TTS</td><td>${ok(!!s.voice.tts)}</td></tr>
     <tr><td>Сейчас распознаёт</td><td><b>${s.voice.engine === "gigaam" ? "GigaAM" : s.voice.engine === "vosk" ? "Vosk" : "—"}</b></td></tr>
     ${s.voice.note ? `<tr><td colspan="2" class="muted">${esc(s.voice.note)}</td></tr>` : ""}
     <tr><td>Резервных копий</td><td>${s.backups}</td></tr></table></div>
