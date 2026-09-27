@@ -40,7 +40,7 @@ def render_reply(text: str, keep: bool = False, *, situaciya: str = "", fio: str
         plan = ScenePlan(voice or "female_warm", spoken, None, 0.0, True, "plain", False)
     else:
         plan = classify(
-            text, sytuacjiya=situaciya, fio=fio, gruppa=gruppa,
+            text, situaciya=situaciya, fio=fio, gruppa=gruppa,
             turn=turn, voice=voice, call_id=call_id,
         )
     from .f5_engine import OUTPUTS_DIR, synthesize_f5_fast
@@ -122,7 +122,7 @@ def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
         raise HTTPException(400, "пустой текст")
     try:
         data, _meta = render_reply(
-            text, keep=False, sytuacjiya=situaciya[:800], fio=fio[:120],
+            text, keep=False, situaciya=situaciya[:800], fio=fio[:120],
             gruppa=str(gruppa)[:8], turn=turn, voice=voice[:64],
             call_id=call_id[:80], plain=bool(plain),
         )
