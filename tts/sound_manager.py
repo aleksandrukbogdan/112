@@ -319,6 +319,91 @@ def apply_acoustic_filter(
     return np.float32(sosfilt(sos, audio) * vol * 0.85)
 
 
+_EFFECT_CLOCK: Dict[str, Dict[str, float]] = {}
+_EFFECT_ORDER: List[str] = []
+_EFFECT_LOCK = threading.Lock()
+
+
+def reset_effect_clock(call_id: str = "") -> None:
+    with _EFFECT_LOCK:
+        if call_id:
+            _EFFECT_CLOCK.pop(call_id, None)
+        else:
+            _EFFECT_CLOCK.clear()
+            _EFFECT_ORDER.clear()
+
+
+def _clock_slot(call_id: str, track_id: str) -> Dict[str, float]:
+    slot = _EFFECT_CLOCK.get(call_id)
+    if slot is None:
+        slot = {}
+        _EFFECT_CLOCK[call_id] = slot
+        _EFFECT_ORDER.append(call_id)
+        if len(_EFFECT_ORDER) > 200:
+            old = _EFFECT_ORDER.pop(0)
+            _EFFECT_CLOCK.pop(old, None)
+    state = slot.get(track_id)
+    if state is None:
+        state = {"cursor": 0.0, "next_at": 0.0}
+        slot[track_id] = state
+    return state
+
+
+def place_spaced_effect(
+    track_id: str,
+    target_samples: int,
+    sr: int = 24000,
+    filter_type: str = "room",
+    volume: float = 0.30,
+    call_id: str = "",
+) -> np.ndarray:
+    """Один проход wav в начале, следующий не раньше чем через 30 секунд речи."""
+    from .effect_gap import plan_effect_starts
+
+    out = np.zeros(target_samples, dtype=np.float32)
+    raw_audio = get_cached_sound(track_id, target_sr=sr)
+    if raw_audio is None or len(raw_audio) == 0 or target_samples <= 0:
+        return out
+
+    processed = apply_acoustic_filter(raw_audio, sr=sr, filter_type=filter_type, volume=volume)
+    effect_len = len(processed)
+    fade_len = min(int(0.12 * sr), effect_len // 4)
+    if fade_len > 1:
+        processed = processed.copy()
+        processed[:fade_len] *= np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        processed[-fade_len:] *= np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+
+    utter_dur = target_samples / float(sr)
+    effect_dur = effect_len / float(sr)
+    key = (call_id or "").strip()
+
+    if not key:
+        n = min(effect_len, target_samples)
+        out[:n] += processed[:n]
+        return out
+
+    with _EFFECT_LOCK:
+        state = _clock_slot(key, track_id)
+        starts, cursor, next_at = plan_effect_starts(
+            state["cursor"], utter_dur, effect_dur, state["next_at"],
+        )
+        state["cursor"] = cursor
+        state["next_at"] = next_at
+
+    for local in starts:
+        start_i = int(round(local * sr))
+        if start_i >= target_samples:
+            continue
+        room = target_samples - start_i
+        n = min(effect_len, room)
+        chunk = processed[:n]
+        if n < effect_len and fade_len > 1 and n > fade_len:
+            chunk = chunk.copy()
+            chunk[-fade_len:] *= np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+        out[start_i:start_i + n] += chunk
+    return out
+
+
 def get_background_audio_slice(
     track_id: str,
     target_samples: int,

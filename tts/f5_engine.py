@@ -761,7 +761,7 @@ def trim_trailing_silence(audio: np.ndarray, sr: int = 24000, threshold: float =
     return audio[:keep_samples]
 
 
-from .sound_manager import get_background_audio_slice
+from .sound_manager import place_spaced_effect
 
 
 def synthesize_f5_fast(
@@ -779,6 +779,7 @@ def synthesize_f5_fast(
     sound_volume: float = 0.30,
     output_name: str = "",
     gen_id: Optional[int] = None,
+    call_id: str = "",
 ) -> Dict[str, Any]:
     """
     Выполняет мгновенный резидентный синтез F5-TTS в VRAM GPU без перезапуска Python.
@@ -943,12 +944,13 @@ def synthesize_f5_fast(
                     if abs(sound_volume - 0.30) < 1e-4 and "default_volume" in meta:
                         eff_vol = meta["default_volume"]
 
-                sound_bg = get_background_audio_slice(
+                sound_bg = place_spaced_effect(
                     track_id=chosen_sound,
                     target_samples=len(wav),
                     sr=sr,
                     filter_type=eff_filter,
                     volume=eff_vol,
+                    call_id=call_id,
                 )
                 if len(sound_bg) > 0:
                     min_s = min(len(wav), len(sound_bg))

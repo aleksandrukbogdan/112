@@ -57,6 +57,7 @@ def render_reply(text: str, keep: bool = False, *, situaciya: str = "", fio: str
         sound_volume=plan.sound_volume if plan.sound_track else 0.30,
         output_name=name,
         gen_id=_stable_gen_id(),
+        call_id=call_id,
     )
     if not meta or meta.get("cancelled") or meta.get("status") == "cancelled":
         raise RuntimeError(meta.get("error") if isinstance(meta, dict) else "синтез отменён")

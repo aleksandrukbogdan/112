@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tts.effect_gap import plan_effect_starts
 from tts.ref_fit import fit_ref_text
 from tts.scene import classify
 
@@ -236,6 +237,43 @@ def test_brigade_stays_clean_and_override_keeps_bed():
     assert pinned.voice == "female_warm"
     assert pinned.sound_track == "fire_inferno"
     assert pinned.text.startswith("#пожар ")
+
+
+def test_effect_repeats_only_after_thirty_seconds_of_dialogue():
+    starts, cursor, nxt = plan_effect_starts(0, 8, 4, 0)
+    assert starts == [0.0]
+    assert cursor == 8
+    assert nxt == 30
+    # Реплики короче паузы эффект не перезапускают.
+    starts, cursor, nxt = plan_effect_starts(cursor, 8, 4, nxt)
+    assert starts == []
+    assert cursor == 16
+    assert nxt == 30
+    starts, cursor, nxt = plan_effect_starts(cursor, 8, 4, nxt)
+    assert starts == []
+    # На 30-й секунде речи повтор помещается целиком.
+    starts, cursor, nxt = plan_effect_starts(24, 10, 4, 30)
+    assert starts == [6.0]
+    assert nxt == 60
+    # В оставшиеся 2 секунды четырёхсекундный файл не влезает.
+    starts, cursor, nxt = plan_effect_starts(28, 4, 4, 30)
+    assert starts == []
+    assert nxt == 30
+    # Следующая реплика уже длиннее файла — эффект идёт с её начала.
+    starts, cursor, nxt = plan_effect_starts(cursor, 6, 4, nxt)
+    assert starts == [0.0]
+    # Длинный фон не зацикливается: в начале один старт, снова только через 30 с.
+    starts, cursor, nxt = plan_effect_starts(0, 5, 53, 0)
+    assert starts == [0.0]
+    assert nxt == 30
+    starts, cursor, nxt = plan_effect_starts(cursor, 5, 53, nxt)
+    assert starts == []
+    starts, cursor, nxt = plan_effect_starts(28, 8, 53, 30)
+    assert starts == [2.0]
+    assert nxt == 60
+    starts, _, nxt = plan_effect_starts(29, 2.5, 53, 30)
+    assert starts == []
+    assert nxt == 30
 
 
 def test_ref_text_is_cut_to_the_recording():
