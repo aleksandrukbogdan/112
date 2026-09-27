@@ -358,4 +358,33 @@ table.t td{border-color:var(--br)}
 .zap .ln{display:flex;gap:8px;padding:5px 0;border-bottom:1px dashed var(--br);font-size:13px}
 .zap .ln b{min-width:78px;color:var(--dim);font-weight:600}
 .zap .ln button{margin-left:auto;border:0;background:none;cursor:pointer;color:var(--ac)}
-@media(max-width:1100px){.arm-top{grid-template-columns:1fr 1fr}.dds-grid,.arm-row{grid-template-columns:1fr}}
+@media(max-width:1100px){.arm-top{grid-template-columns:1fr 1fr}.dds-grid,.arm-row,.arm-call-body,.arm-split2{grid-template-columns:1fr}}
+
+/* ---------- карточка оператора и ДДС в раскладке АРМ ---------- */
+.arm-call{display:flex;flex-direction:column;gap:6px;min-height:calc(100vh - 120px)}
+.arm-call-body{display:grid;grid-template-columns:280px minmax(0,1fr) 280px;gap:8px;align-items:start;min-height:0}
+.arm-call-body.dds-body{grid-template-columns:minmax(0,1.4fr) minmax(280px,.7fr)}
+.arm-talk,.arm-sheet,.arm-side{min-width:0}
+.arm-talk{background:var(--pan);border:1px solid var(--br);display:flex;flex-direction:column;max-height:calc(100vh - 230px)}
+.arm-talk .dlg{height:auto;flex:1;min-height:180px;max-height:calc(100vh - 340px);padding:8px}
+.arm-talk .dlg-in{padding:0 8px 8px}
+.arm-sheet{background:#d5d9dd;border:1px solid var(--br);padding:8px}
+.arm-who{background:#fff;border:1px solid var(--br);padding:8px 10px;margin-bottom:6px}
+.arm-who label,.arm-desc{font-size:12px;color:var(--dim)}
+.arm-who input,.arm-desc input,.arm-desc textarea,.arm-addr input{background:#fff}
+.arm-priz{margin-bottom:6px}
+.arm-priz .tag{background:#fff}
+.arm-split2{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:8px}
+.arm-addr{background:#efefef;border:1px solid var(--br);padding:8px 10px}
+.arm-addr-h{display:flex;justify-content:space-between;margin-bottom:6px}
+.arm-addr-g{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px}
+.arm-addr-g label{font-size:11px;color:var(--dim)}
+.arm-desc{display:block;margin-top:8px}
+.arm-q{background:#fff;border:1px solid var(--br);padding:8px 10px}
+.arm-q .l,.arm-talk .arm-bar{margin-bottom:6px}
+.arm-side{max-height:calc(100vh - 230px);overflow:auto}
+.svc-plus{width:34px;height:28px;border:0;background:rgba(0,0,0,.25);color:#fff;font-size:20px;line-height:1;cursor:pointer}
+.svc-list{max-height:360px;overflow:auto;border:1px solid var(--br);background:#fff}
+.svc-row{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid var(--br);cursor:pointer}
+.svc-row input{width:auto;margin-top:3px}
+.dds-bottom #ready{color:#fff;font-size:12px;align-self:center}

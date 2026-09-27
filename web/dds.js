@@ -85,44 +85,56 @@ function ddsView() {
   $("#hdrRight").innerHTML = "";
   const sozd = new Date(k.sozdana * 1000).toLocaleString("ru-RU");
   v.innerHTML = `
+  <div class="arm-call">
   <div class="arm-top">
-    <div class="arm-box"><div>📞 Отключение</div><button class="btn btn-g btn-sm" style="margin-top:5px" onclick="ddsZapis()">записи звонков</button></div>
+    <div class="arm-box"><div class="l">Отключение</div><button class="btn btn-g btn-sm" style="margin-top:5px" onclick="ddsZapis()">записи звонков</button></div>
     <div class="arm-box"><div class="l">АОН</div><div class="v">${esc(k.aon)}</div></div>
     <div class="arm-box"><div class="l">предоставленный</div><div class="v">—</div></div>
     <div class="arm-box"><div class="l">телефон на место</div><div class="v">—</div></div>
     <div class="arm-box arm-no"><b>Происшествие ${esc(k.nomer)}</b><div>Сохр. ${sozd}</div><div>${esc(k.operator_112)}</div></div>
     <div class="arm-box arm-clock" id="ddsClock"></div>
   </div>
-  <div class="arm-row">
-    <div class="arm-box" style="min-height:0"><div class="l">ФИО заявителя</div><b>${esc(k.zayavitel_fio)}</b></div>
-    <div class="arm-box" style="min-height:0">Пострадавшие: <b>${POST_RU[k.postradavshie]}</b> ·
-      <span class="muted">служба: <b>${esc(k.moya_sluzhba)}</b></span> · <span class="muted" id="ddsFaza"></span></div>
-  </div>
-  <div class="dds-grid">
-    <div>
-      <div class="arm-box" style="margin-bottom:6px"><b>${esc(k.adres)}</b></div>
-      <div class="arm-box" style="min-height:120px"><b>${sozd} · оператор 112</b><div style="margin-top:4px">${esc(k.opisanie)}</div></div>
-      <div class="arm-bar" style="margin-top:6px">Происшествие · ${esc(k.tip)}</div>
-      <div class="arm-line">Класс.: <b>${esc(k.tip)}</b> · пострадавшие: ${POST_RU[k.postradavshie]}</div>
-      <div class="card" style="margin-top:8px"><h2>Проверка карточки <span class="muted">сверьте с записью разговора 112</span></h2>
-        <div class="row" style="gap:8px;align-items:flex-end">
-          <div style="flex:1"><label>Поле с ошибкой</label><select id="zPole">
-            <option value="adres">Адрес</option><option value="telefon">Телефон (АОН)</option>
-            <option value="postradavshie">Пострадавшие</option></select></div>
-          <div style="flex:2"><label>Верное значение (по записи)</label><input id="zVer" placeholder="например: …, дом 12"></div>
-          <button class="btn btn-g" onclick="ddsZam()">Отметить расхождение</button></div>
-        <div id="zList" class="hint">Расхождений не отмечено. Если ошибок нет — ничего не отмечайте.</div></div>
-    </div>
-    <div>
-      <div class="card zap" style="margin-bottom:8px"><h2>Запись разговора 112 <span class="badge b-dim">доступна ДДС</span></h2>
+  <div class="arm-call-body dds-body">
+    <section class="arm-sheet">
+      <div class="arm-who"><div class="l">Фамилия и имя заявителя</div><b>${esc(k.zayavitel_fio)}</b></div>
+      <div class="tagwrap arm-priz">
+        <span class="tag ${k.postradavshie === "est" ? "on" : ""}">Пострадавшие: ${POST_RU[k.postradavshie]}</span>
+        <span class="tag">служба: ${esc(k.moya_sluzhba)}</span>
+        <span class="tag" id="ddsFaza"></span>
+      </div>
+      <div class="arm-split2">
+        <div>
+          <div class="arm-addr">
+            <div class="arm-addr-h"><b>Адрес</b><span>Москва</span></div>
+            <div class="arm-line">${esc(k.adres)}</div>
+          </div>
+          <div class="arm-box" style="margin-top:6px"><div class="l">${sozd} · оператор 112</div><div style="margin-top:4px">${esc(k.opisanie)}</div></div>
+        </div>
+        <div class="arm-q">
+          <div class="l">Что случилось?</div>
+          <div class="tagwrap"><span class="tag on">${esc(k.tip)}</span></div>
+          <div class="card" style="margin-top:8px"><h2>Проверка карточки <span class="muted">сверьте с записью</span></h2>
+            <div class="row" style="gap:8px;align-items:flex-end">
+              <div style="flex:1"><label>Поле с ошибкой</label><select id="zPole">
+                <option value="adres">Адрес</option><option value="telefon">Телефон (АОН)</option>
+                <option value="postradavshie">Пострадавшие</option></select></div>
+              <div style="flex:2"><label>Верное значение (по записи)</label><input id="zVer" placeholder="например: …, дом 12"></div>
+              <button class="btn btn-g" onclick="ddsZam()">Отметить расхождение</button></div>
+            <div id="zList" class="hint">Расхождений не отмечено. Если ошибок нет — ничего не отмечайте.</div></div>
+        </div>
+      </div>
+    </section>
+    <section class="arm-side">
+      <div class="card zap" style="margin-bottom:8px"><h2>Запись разговора 112</h2>
         <div id="zapBody" style="max-height:230px;overflow:auto"></div></div>
       <div class="card"><h2>IP-телефон</h2><div id="phone"></div></div>
-    </div>
+    </section>
   </div>
   <div class="card" style="margin-top:8px" id="stPanel"></div>
   <div class="dds-bottom"><span class="lab">Службы:</span><span id="chips" class="row" style="gap:4px"></span>
     <span style="margin-left:auto"></span>
-    <button class="btn btn-g" onclick="ddsFinish()">Закрыть карточку и получить разбор</button></div>`;
+    <button class="btn btn-g" onclick="ddsFinish()">Закрыть карточку и получить разбор</button></div>
+  </div>`;
   $("#zapBody").innerHTML = DS.zapis.map((z, i) => `<div class="ln"><b>${z.t_sec} с · ${z.kto === "operator" ? "Оператор 112" : "Заявитель"}</b>
     <span>${esc(z.tekst)}</span>${S.tts ? `<button onclick="ddsPlay(${i})" title="прослушать">▶</button>` : ""}</div>`).join("");
   ddsChips(); ddsPhone(); ddsStPanel(); ddsTick();

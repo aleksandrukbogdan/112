@@ -214,55 +214,94 @@ async function startFrom(scId, aid) {
 function tick() {
   const box = $("#timer"); if (!box) return;
   const t = (Date.now() - S.t0) / 1000, n = S.cfg.normativy.kartochka_sec;
-  const p = Math.min(100, t / n * 100);
-  const c = t > n ? "var(--bad)" : t > S.tayming ? "var(--warn)" : p > 60 ? "#eab308" : "var(--ok)";
-  box.className = "timer" + (t > n ? " timer-over" : "");
-  box.innerHTML = `<div class="timer-top"><span class="timer-v" style="color:${c}">${Math.floor(t)}<span class="timer-u">с</span></span>
-    <span class="timer-n">лимит ${S.tayming} с · норматив ${n} с</span></div>
-    <div class="timer-bar"><div class="timer-fill" style="width:${p}%;background:${c}"></div></div>
-    <div class="timer-src">ПП РФ 1931, п. 9 подп. «р»</div>`;
+  const over = t > n;
+  const mm = String(Math.floor(t / 60)).padStart(2, "0");
+  const ss = String(Math.floor(t % 60)).padStart(2, "0");
+  box.className = "arm-box arm-clock" + (over ? " over" : "");
+  box.innerHTML = `<div class="v">${mm}:${ss}</div><div class="l">${over ? "норматив превышен" : "лимит " + S.tayming + " с · норматив " + n + " с"}</div>`;
 }
 
 function viewCall() {
   const v = $("#view");
   document.querySelectorAll("#nav button").forEach(b => b.classList.remove("on"));
-  $("#hdrRight").innerHTML = `<div class="timer" id="timer"></div>`;
+  $("#hdrRight").innerHTML = "";
+  S.addr = {};
+  const title = esc(S.sc.nazvanie || S.sc.id);
   v.innerHTML = `
-  <div class="grid g3">
-    <section class="card">
-      <h2>Разговор <span class="badge b-dim">${esc(S.sc.id)}</span></h2>
-      <div class="dlg" id="dlg"></div>
-      <div class="dlg-in">
-        <button class="mic" id="mic" title="${S.voice ? "Нажмите и говорите, нажмите ещё раз — отправить" : "Голосовой сервис не запущен"}"
-          ${S.voice ? "" : "disabled"}>🎙</button>
-        <input id="inp" placeholder="Реплика заявителю…" autocomplete="off">
-        <button class="btn" onclick="send()">→</button>
-      </div>
-      <div class="hint">Точный адрес заявитель назовёт только на уточняющий вопрос:
-        «уточните номер дома», «как проехать», «ближайший адрес».</div>
-    </section>
-    <section class="card">
-      <h2>Карточка происшествия <span class="badge b-dim" id="cardState">0/5</span></h2>
-      <div class="fld"><label class="req">Описание со слов заявителя</label>
-        <textarea id="f_opisanie" oninput="setField('opisanie',this.value)"></textarea></div>
-      <div class="fld"><label class="req">Адрес происшествия</label>
-        <input id="f_adres" oninput="setField('adres_polny',this.value)" placeholder="Город, улица, дом, корпус, строение, км…"></div>
-      <div class="row" style="gap:10px">
-        <div class="fld" style="flex:1"><label class="req">ФИО заявителя</label>
-          <input id="f_fio" oninput="setField('zayavitel_fio',this.value)"></div>
-        <div class="fld" style="flex:1"><label class="req">Телефон</label>
-          <input id="f_tel" oninput="setField('zayavitel_telefon',this.value)"></div>
-      </div><hr>
-      <h3>Что случилось? <span class="muted">быстрый выбор, как в АРМ</span></h3><div class="tagwrap" id="quick"></div>
-      <h3>Тип происшествия — классификатор 0.46.24</h3><div id="tags"></div><hr>
-      <h3>Признаки <span class="muted">влияют на состав служб</span></h3><div class="tagwrap" id="priz"></div><hr>
-      <h3>Направить в ДДС <span class="muted">Alt + 1…6</span></h3><div class="svc" id="svc"></div><hr>
-      <div class="row sp"><span class="muted" id="ready"></span>
-        <div class="row"><button class="btn btn-g btn-sm" onclick="abandon()">Прервать</button>
-        <button class="btn btn-ok" id="send" onclick="finish()" disabled>Отправить карточку</button></div></div>
-    </section>
-    <section class="card"><h2>Подсказки и прогноз</h2><div id="side"></div></section>
+  <div class="arm-call">
+    <div class="arm-top">
+      <div class="arm-box"><div class="l">Отключение</div><div class="v" style="font-size:13px">разговор слева</div></div>
+      <div class="arm-box"><div class="l">АОН</div>
+        <input id="f_tel" oninput="setField('zayavitel_telefon',this.value)" placeholder="+7 ( ) - -"></div>
+      <div class="arm-box"><div class="l">предоставленный</div><div class="v">—</div></div>
+      <div class="arm-box"><div class="l">телефон на место</div><div class="v">—</div></div>
+      <div class="arm-box arm-no"><b>${title}</b><div id="cardState">0/5</div></div>
+      <div class="arm-box arm-clock" id="timer"></div>
+    </div>
+    <div class="arm-call-body">
+      <section class="arm-talk">
+        <div class="arm-bar">Разговор</div>
+        <div class="dlg" id="dlg"></div>
+        <div class="dlg-in">
+          <button class="mic" id="mic" title="${S.voice ? "Нажмите и говорите, нажмите ещё раз — отправить" : "Голосовой сервис не запущен"}"
+            ${S.voice ? "" : "disabled"}>🎙</button>
+          <input id="inp" placeholder="Реплика заявителю…" autocomplete="off">
+          <button class="btn" onclick="send()">→</button>
+        </div>
+      </section>
+      <section class="arm-sheet">
+        <div class="arm-who">
+          <label>Фамилия и имя заявителя</label>
+          <input id="f_fio" oninput="setField('zayavitel_fio',this.value)">
+        </div>
+        <div class="tagwrap arm-priz" id="priz"></div>
+        <div class="arm-split2">
+          <div>
+            <div class="arm-addr">
+              <div class="arm-addr-h"><b>Адрес</b><span>Москва</span></div>
+              <div class="arm-addr-g">
+                <label>Округ<input data-part="okrug" placeholder="САО"></label>
+                <label>Район<input data-part="raion" placeholder="район"></label>
+                <label>Улица<input data-part="ulica" placeholder="улица"></label>
+                <label>Дом/Вл.<input data-part="dom" placeholder="дом"></label>
+                <label>Корпус<input data-part="korpus"></label>
+                <label>Квартира<input data-part="kvartira"></label>
+                <label>Подъезд<input data-part="podezd"></label>
+                <label>Этаж<input data-part="etazh"></label>
+              </div>
+              <label class="arm-desc">Описательный адрес
+                <input id="f_adres" oninput="setField('adres_polny',this.value)" placeholder="Город, улица, дом, корпус…"></label>
+            </div>
+            <label class="arm-desc">Описание со слов заявителя
+              <textarea id="f_opisanie" oninput="setField('opisanie',this.value)" placeholder="Введите"></textarea></label>
+          </div>
+          <div class="arm-q">
+            <div class="l">Что случилось?</div>
+            <div class="tagwrap" id="quick"></div>
+            <div id="tags"></div>
+          </div>
+        </div>
+      </section>
+      <section class="arm-side"><div class="arm-bar">Подсказки</div><div id="side"></div></section>
+    </div>
+    <div class="dds-bottom">
+      <span class="lab">Службы:</span>
+      <span id="svc" class="row" style="gap:4px"></span>
+      <button type="button" class="svc-plus" onclick="openSvc()" title="Добавить службы">+</button>
+      <span class="lab" id="ready"></span>
+      <span style="margin-left:auto"></span>
+      <button class="btn btn-g" onclick="abandon()">Прервать</button>
+      <button class="btn btn-ok" id="send" onclick="finish()" disabled>Сохранить</button>
+    </div>
   </div>`;
+  v.querySelectorAll("[data-part]").forEach(el => el.oninput = () => {
+    S.addr[el.dataset.part] = el.value;
+    const order = ["okrug", "raion", "ulica", "dom", "korpus", "kvartira", "podezd", "etazh"];
+    const bits = ["Москва", ...order.map(k => (S.addr[k] || "").trim()).filter(Boolean)];
+    const s = bits.join(", ");
+    $("#f_adres").value = s;
+    setField("adres_polny", s);
+  });
   drawDlg(); drawQuick(); drawTags(); drawPriz(); drawSvc(); updReady(); drawSide(); tick();
   $("#inp").focus();
   $("#inp").onkeydown = e => { if (e.key === "Enter") send(); };
@@ -396,13 +435,30 @@ async function setPriz(k, v) {
 
 function drawSvc() {
   const b = $("#svc"); if (!b) return;
-  b.innerHTML = S.cfg.routes.map(r => {
-    const on = S.svc.includes(r.kod);
-    return `<button class="${on ? "on" : ""}" data-k="${r.kod}"
-      style="${on ? `background:${r.color};border-color:${r.color}` : `color:${r.color}`}">
-      ${esc(r.korotko)}<span class="hk">⌥${r.hotkey}</span></button>`;
+  b.innerHTML = S.svc.map(k => {
+    const r = S.cfg.routes.find(x => x.kod === k);
+    return `<button type="button" class="svc-chip moya" data-k="${esc(k)}"><b>${esc(r ? r.korotko : k)}</b></button>`;
   }).join("");
   b.querySelectorAll("[data-k]").forEach(x => x.onclick = () => toggleSvc(x.dataset.k));
+  const list = $("#svcList");
+  if (list) list.querySelectorAll("input[data-k]").forEach(c => { c.checked = S.svc.includes(c.dataset.k); });
+}
+function openSvc() {
+  const rows = S.cfg.routes.map(r => `<label class="svc-row">
+    <input type="checkbox" data-k="${esc(r.kod)}" ${S.svc.includes(r.kod) ? "checked" : ""}>
+    <span><b>${esc(r.nazvanie)}</b><br><span class="muted">${esc(r.korotko)} · Alt+${esc(r.hotkey)}</span></span></label>`).join("");
+  modal(`<h2>Добавить службы</h2>
+    <input id="svcQ" placeholder="Поиск…" style="margin-bottom:8px">
+    <div id="svcList" class="svc-list">${rows}</div>
+    <button class="btn btn-ok" style="margin-top:12px" onclick="closeModal()">Сохранить и закрыть</button>`);
+  const filter = () => {
+    const q = ($("#svcQ").value || "").toLowerCase();
+    $("#svcList").querySelectorAll(".svc-row").forEach(row => {
+      row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none";
+    });
+  };
+  $("#svcQ").oninput = filter;
+  $("#svcList").querySelectorAll("input[data-k]").forEach(c => c.onchange = () => toggleSvc(c.dataset.k));
 }
 function toggleSvc(k) { S.svc = S.svc.includes(k) ? S.svc.filter(x => x !== k) : [...S.svc, k]; drawSvc(); updReady(); }
 function hotkeys(e) {
