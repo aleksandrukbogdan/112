@@ -14,7 +14,7 @@ COPY requirements-docker.txt /tmp/requirements-docker.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-docker.txt \
     && pip install --no-cache-dir --no-deps f5-tts==1.1.22
 
-COPY f5_engine.py sound_manager.py scene.py tts_service.py __init__.py voices_f5.json /app/tts/
+COPY f5_engine.py sound_manager.py scene.py tts_service.py ref_fit.py __init__.py voices_f5.json /app/tts/
 
 EXPOSE 8092
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=5 \
