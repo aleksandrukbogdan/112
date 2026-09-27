@@ -87,7 +87,7 @@ services:
       - ${F5_MODEL_DIR:-/data/models/F5-TTS_RUSSIAN}:/models/F5-TTS_RUSSIAN:ro
       - ${F5_HF_HOME:-/data/models}:/hf:ro
       - ${F5_SOUND_DIR:-/data/112/voice/Sound}:/sounds:ro
-      - ${F5_VOICES_DIR:-/data/112/voice/Voices}:/voices:ro
+      - ${F5_VOICES_DIR:-/data/112/voice/Voices}:/voices
     deploy:
       resources:
         reservations:

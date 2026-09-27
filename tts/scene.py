@@ -5,12 +5,13 @@
 На вход приходит чистый текст, который уже видит обучаемый.
 Хэштеги добавляются только здесь и в чат не возвращаются.
 
-Память сцены одна на процесс: для демо с одним обучаемым пожар
-не пропадает на коротком адресе. Два одновременных занятия могут
-перемешать голоса — так и задумано, пока в запрос синтеза не передают id звонка.
+Если вместе с репликой передан билет (ситуация, группа, ФИО),
+голос и фон берутся из билета и держатся на всех ответах заявителя.
+Без билета остаётся прежний разбор по тексту: так говорят бригады.
 """
 from __future__ import annotations
 
+import random
 import re
 import threading
 import time
@@ -123,8 +124,99 @@ def _bed(kind: str) -> str | None:
         "medical": "heavy_breathing",
         "water": None,
         "fight": None,
-        "door": None,
+        "door": "door_slam",
     }.get(kind)
+
+
+_OPEN_FIRE = re.compile(r"пож\w*|горит|огон\w*|плам\w*|возгор", re.I)
+_SMOKE = re.compile(r"задым\w*|дыма|дыму|\bдым\b", re.I)
+_GROUP_KIND = {"1": "fire", "2": "crash"}
+_FIO_F = re.compile(r"(ова|ева|ёва|ина|ына|ая|яя)$", re.I)
+_FIO_M = re.compile(r"(ов|ев|ёв|ин|ын|ий|ой|ых)$", re.I)
+
+
+def _gender_person(fio: str, situaciya: str) -> str | None:
+    """Пол заявителя из ФИО и описания билета, не из текущей фразы."""
+    found = _gender(f"{fio or ''} {situaciya or ''}", None)
+    if found:
+        return found
+    parts = [p for p in re.split(r"\s+", (fio or "").replace("—", " ").strip()) if p and p not in "-–"]
+    if not parts:
+        return None
+    sur = parts[0]
+    if _FIO_F.search(sur):
+        return "f"
+    if _FIO_M.search(sur):
+        return "m"
+    blob = " ".join(parts)
+    if re.search(r"(вич|ьич|оглы)\b", blob, re.I):
+        return "m"
+    if re.search(r"(вна|чна)\b", blob, re.I):
+        return "f"
+    return None
+
+
+def _smoke_only(text: str) -> bool:
+    """Задымление без открытого огня звучит тише. «Пламени не видит» — это дым, не пожар."""
+    raw = text or ""
+    if not _SMOKE.search(raw):
+        return False
+    if re.search(r"пож\w*|горит|огон\w*|возгор", raw, re.I):
+        return False
+    if re.search(r"пламен\w*\s+не|не\s+\w*\s*плам|без\s+плам", raw, re.I):
+        return True
+    return not _OPEN_FIRE.search(raw)
+
+
+def _volume(track: str | None, situaciya: str) -> float:
+    """Громкость фона чуть плавает от реплики к реплике, сцена не меняется."""
+    if not track:
+        return 0.0
+    if track == "fire_inferno" and _smoke_only(situaciya):
+        base = 0.18
+    elif track == "car_crash":
+        base = 0.40
+    elif track == "door_slam":
+        base = 0.34
+    else:
+        base = 0.28
+    vol = max(0.08, min(0.48, base + random.uniform(-0.04, 0.04)))
+    # Ровно 0.30 движок подменяет громкостью из каталога дорожки.
+    if abs(vol - 0.30) < 0.008:
+        vol += 0.02
+    return round(vol, 3)
+
+
+def _from_ticket(raw: str, situaciya: str, fio: str, gruppa: str,
+                 turn: int, voice_override: str) -> ScenePlan:
+    kind = _match(situaciya or "") or _GROUP_KIND.get(str(gruppa or "").strip())
+    gender = _gender_person(fio, situaciya)
+    panicked = bool(_PANIC.search(situaciya or "")) or kind in ("crash", "water", "fight", "door")
+    override = (voice_override or "").strip()
+    if override and override != "auto":
+        chosen = override
+    else:
+        chosen = _voice(kind or "neutral", gender, panicked if kind else False)
+    n = int(turn or 1)
+    if kind == "crash" and n <= 1:
+        event, track = "car_crash", "car_crash"
+    elif kind == "crash":
+        event, track = None, "traffic_highway"
+    elif kind == "door":
+        event, track = "door_slam", "door_slam"
+    else:
+        event, track = None, _bed(kind) if kind else None
+    tags = _tags(kind, panicked, event) if kind else ""
+    spoken = f"{tags} {raw}".strip() if tags else raw
+    return ScenePlan(
+        voice=chosen,
+        text=spoken,
+        sound_track=track,
+        sound_volume=_volume(track, situaciya),
+        official=False,
+        scene=kind or "neutral",
+        inherited=n > 1,
+    )
 
 
 def _event(kind: str, sticky: dict | None) -> str | None:
@@ -135,9 +227,18 @@ def _event(kind: str, sticky: dict | None) -> str | None:
     return None
 
 
-def classify(text: str) -> ScenePlan:
-    global _STICKY
+def classify(text: str, *, situaciya: str = "", fio: str = "", gruppa: str = "",
+             turn: int = 0, voice: str = "", call_id: str = "") -> ScenePlan:
     raw = re.sub(r"\s+", " ", (text or "")).strip()
+    # call_id различает занятия на стороне API; сцена полностью задаётся билетом и номером реплики.
+    _ = call_id
+    if (situaciya or "").strip() or str(gruppa or "").strip():
+        return _from_ticket(raw, situaciya, fio, gruppa, turn, voice)
+    return _from_utterance(raw)
+
+
+def _from_utterance(raw: str) -> ScenePlan:
+    global _STICKY
     now = time.monotonic()
     with _LOCK:
         sticky = _STICKY

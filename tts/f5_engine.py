@@ -13,11 +13,14 @@
 - Автоматическая очистка кэша CUDA (torch.cuda.empty_cache()).
 """
 
+import io
 import os
+import re
 import sys
 import time
-import re
 import json
+import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any, List
@@ -170,6 +173,116 @@ def get_cached_ref(voice_id: str, voices_catalog: Dict[str, Any]):
         return ref_audio, ref_text_processed
 
     raise FileNotFoundError(f"Не найден эталонный голос для {voice_id}")
+
+
+_VOICE_IO = threading.Lock()
+_VOICE_ID = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def invalidate_voice(voice_id: str) -> None:
+    _REF_CACHE.pop(voice_id, None)
+
+
+def voice_wav_path(voice_id: str) -> Optional[Path]:
+    if not _VOICE_ID.match(voice_id or ""):
+        return None
+    info = get_voices_catalog().get(voice_id) or {}
+    wav = info.get("wav") or ""
+    if not wav or any(x in wav for x in ("/", "\\", "..")):
+        return None
+    root = VOICES_DIR.resolve()
+    path = (VOICES_DIR / wav).resolve()
+    if path.parent != root or not path.is_file():
+        return None
+    return path
+
+
+def _decode_upload(raw: bytes, filename: str) -> Tuple[np.ndarray, int]:
+    try:
+        data, sr = sf.read(io.BytesIO(raw), dtype="float32")
+        return np.asarray(data), int(sr)
+    except Exception:
+        pass
+    suffix = Path(filename or "voice.bin").suffix.lower()
+    if suffix not in (".wav", ".webm", ".ogg", ".mp3", ".m4a", ".flac", ".aac"):
+        suffix = ".bin"
+    src_path = dst_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as src:
+            src.write(raw)
+            src_path = src.name
+        dst_path = src_path + ".wav"
+        run = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", src_path, "-ar", "24000", "-ac", "1", "-f", "wav", dst_path],
+            capture_output=True,
+        )
+        if run.returncode != 0 or not os.path.exists(dst_path):
+            raise ValueError("не удалось прочитать аудио. Нужен wav, webm или mp3")
+        data, sr = sf.read(dst_path, dtype="float32")
+        return np.asarray(data), int(sr)
+    finally:
+        for p in (src_path, dst_path):
+            if p and os.path.exists(p):
+                os.remove(p)
+
+
+def save_uploaded_voice(raw: bytes, filename: str, text: str, voice_name: str) -> Dict[str, Any]:
+    """Кладёт эталон в каталог голосов. Если voices.json ещё нет — копирует семь встроенных."""
+    spoken = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(spoken) < 8:
+        raise ValueError("нужен текст эталона, хотя бы одна фраза")
+    if not raw or len(raw) < 1000:
+        raise ValueError("пустая запись")
+    if len(raw) > 15 * 1024 * 1024:
+        raise ValueError("файл больше 15 МБ")
+
+    data, sr = _decode_upload(raw, filename)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    data = np.asarray(data, dtype=np.float32)
+    if sr <= 0 or len(data) == 0:
+        raise ValueError("пустая запись")
+    duration = len(data) / sr
+    if duration < 1.2:
+        raise ValueError("запись короче 1,5 секунды. Произнесите фразу целиком, 3–5 секунд")
+    if duration > 12.0:
+        data = data[: int(12.0 * sr)]
+        duration = 12.0
+    if sr != 24000:
+        new_len = max(1, int(len(data) * 24000 / sr))
+        data = signal.resample(data, new_len).astype(np.float32)
+        sr = 24000
+    peak = float(np.max(np.abs(data))) if len(data) else 0.0
+    if peak < 0.01:
+        raise ValueError("в записи тишина")
+    data = data / peak * 0.95
+
+    voice_id = f"voice_{int(time.time())}"
+    title = re.sub(r"\s+", " ", (voice_name or "")).strip()[:80] or "Свой голос"
+    with _VOICE_IO:
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        dest_json = VOICES_DIR / "voices.json"
+        if not dest_json.exists():
+            baked = Path(__file__).resolve().parent / "voices_f5.json"
+            catalog = json.loads(baked.read_text(encoding="utf-8")) if baked.exists() else {}
+        else:
+            catalog = json.loads(dest_json.read_text(encoding="utf-8"))
+        wav_name = f"{voice_id}.wav"
+        sf.write(str(VOICES_DIR / wav_name), data, sr, format="WAV")
+        catalog[voice_id] = {
+            "name": title,
+            "text": spoken[:400],
+            "wav": wav_name,
+            "speaker_type": "custom",
+        }
+        dest_json.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+        invalidate_voice(voice_id)
+    return {
+        "voice_id": voice_id,
+        "voice_name": title,
+        "duration_sec": round(duration, 2),
+        "text": spoken[:400],
+    }
 
 
 def parse_f5_tags(text: str) -> Dict[str, Any]:

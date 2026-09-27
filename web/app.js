@@ -81,7 +81,7 @@ const TABS = {
   teacher: [["monitor", "Мониторинг"], ["scen", "Сценарии"], ["assign", "Назначения"],
             ["group", "Аналитика группы"], ["grades", "Занятия и оценки"], ["reports", "Отчёты"], ["dds", "Пробный ДДС"], ["pick", "Пробный вызов 112"]],
   admin: [["system", "Система"], ["users", "Пользователи"], ["audit", "Журнал аудита"],
-          ["backup", "Резервные копии"], ["settings", "Настройки"], ["reports", "Отчёты"]],
+          ["backup", "Резервные копии"], ["settings", "Настройки"], ["voices", "Голоса"], ["reports", "Отчёты"]],
 };
 const ROLE_RU = { admin: "администратор", teacher: "преподаватель", trainee: "обучающийся" };
 
@@ -289,7 +289,7 @@ async function send(text) {
       toast(`Речь: «${n.fragment}» — ${n.opisanie}` + (n.zamena ? `. Лучше: «${n.zamena}»` : ""), "bad");
     }
     if (r.podskazka) toast(r.podskazka, "ok");
-    if (S.tts) new Audio(dl(`/api/voice/tts?text=${encodeURIComponent(r.otvet)}`)).play().catch(() => {});
+    if (S.tts) new Audio(dl(`/api/voice/tts?text=${encodeURIComponent(r.otvet)}&sid=${encodeURIComponent(S.sid)}`)).play().catch(() => {});
   } catch (e) { toast(e.message, "bad"); }
 }
 function quick(q) { send(q); }
@@ -905,7 +905,8 @@ async function viewAudit(v) {
   const RU = { login: "вход", login_fail: "неудачный вход", grade_override: "изменение оценки", scenario_generate: "генерация сценария",
     scenario_published: "сценарий утверждён", scenario_rejected: "сценарий отклонён", assign: "назначение", assign_delete: "снятие назначения",
     user_create: "создан пользователь", user_edit: "изменён пользователь", group_create: "создана группа", backup: "резервная копия",
-    settings: "настройки", password_change: "смена пароля" };
+    settings: "настройки", password_change: "смена пароля", voice_select: "выбор голоса",
+    voice_upload: "загрузка голоса" };
   v.innerHTML = `<div class="card"><h2>Журнал аудита <span class="badge b-dim">${a.length}</span></h2>
     <table class="t"><tr><th>Время</th><th>Пользователь</th><th>Действие</th><th>Подробности</th></tr>
     ${a.map(x => `<tr><td>${fmtT(x.ts)}</td><td class="mono">${esc(x.login)}</td>
@@ -943,10 +944,115 @@ async function settingsSave() {
     S.cfg = await api("/api/config"); toast("Сохранено", "ok"); } catch (e) { toast(e.message, "bad"); }
 }
 
+const VOICE_PHRASE = "Здравствуйте, я свидетель происшествия, сейчас спокойно всё объясню.";
+let voiceBlob = null;
+let voiceRec = null;
+
+async function viewVoices(v) {
+  const d = await api("/api/admin/voices");
+  const selected = d.selected || "auto";
+  const rows = d.voices.map(x => `<tr>
+    <td><label class="row" style="gap:8px;align-items:flex-start">
+      <input type="radio" name="cv" value="${esc(x.id)}" ${x.id === selected ? "checked" : ""}>
+      <span><b>${esc(x.name)}</b><br><span class="muted">${esc(x.text)}</span></span></label></td>
+    <td class="row" style="gap:4px;white-space:nowrap">
+      <button class="btn btn-g btn-sm" ${x.has_audio ? "" : "disabled"} onclick="playVoiceFile('${esc(x.id)}')">Эталон</button>
+      <button class="btn btn-g btn-sm" onclick="playVoiceSample('${esc(x.id)}')">Фраза</button>
+    </td></tr>`).join("");
+  v.innerHTML = `<div class="grid g2">
+    <div class="card"><h2>Голос заявителя в билетах</h2>
+      <div class="hint" style="margin-top:0">Один тембр на весь звонок. Фон и волнение по-прежнему зависят от билета: пожар, ДТП, плач ребёнка.</div>
+      <label class="row" style="gap:8px;margin:12px 0"><input type="radio" name="cv" value="auto" ${selected === "auto" ? "checked" : ""}>
+        <span><b>Авто по билету</b><br><span class="muted">Пол и эмоция из ситуации, без смены голоса между ответами</span></span></label>
+      <table class="t"><tr><th>Эталон</th><th></th></tr>
+        ${rows || `<tr><td colspan="2" class="muted">Каталог пуст</td></tr>`}</table>
+      <button class="btn" style="margin-top:12px" onclick="voiceSelect()">Сохранить выбор</button>
+    </div>
+    <div class="card"><h2>Свой голос</h2>
+      <div class="hint" style="margin-top:0">Запись с микрофона или файл, как на стенде. Фраза 3–5 секунд. Текст должен совпадать с тем, что сказано: по нему копируется тембр.</div>
+      <div class="fld" style="margin-top:12px"><label>Название</label><input id="vname" value="Свой голос"></div>
+      <div class="fld"><label>Текст эталона</label><textarea id="vtext" rows="3">${esc(VOICE_PHRASE)}</textarea></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ok" id="vrec" onclick="voiceToggleRec()">Записать</button>
+        <button class="btn btn-g" id="vsave" onclick="voiceSaveRec()" disabled>Сохранить запись</button>
+        <button class="btn btn-g" onclick="$('#vfile').click()">Загрузить файл</button>
+        <input id="vfile" type="file" accept="audio/*,.wav,.webm,.mp3,.ogg" hidden>
+      </div>
+      <div class="hint" id="vstat">Микрофон пишет 3–5 секунд. После записи голос появится в списке слева.</div>
+    </div></div>`;
+  $("#vfile").onchange = () => {
+    const f = $("#vfile").files && $("#vfile").files[0];
+    if (f) voiceUpload(f, $("#vname").value, f.name);
+  };
+}
+
+function playVoiceFile(id) {
+  new Audio(dl(`/api/admin/voices/${encodeURIComponent(id)}/audio`)).play().catch(() => toast("не удалось прослушать эталон", "bad"));
+}
+function playVoiceSample(id) {
+  const q = `/api/voice/tts?text=${encodeURIComponent("Алло, слушаю вас.")}&voice=${encodeURIComponent(id)}&plain=1`;
+  new Audio(dl(q)).play().catch(() => toast("не удалось синтезировать фразу", "bad"));
+}
+async function voiceSelect() {
+  const picked = document.querySelector("input[name=cv]:checked");
+  if (!picked) return;
+  try {
+    await api("/api/admin/voices/select", { voice_id: picked.value });
+    toast("Голос для билетов сохранён", "ok");
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function voiceToggleRec() {
+  const b = $("#vrec");
+  if (voiceRec) { voiceRec.stop(); return; }
+  try {
+    const st = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ch = [];
+    const rec = new MediaRecorder(st);
+    voiceRec = rec;
+    b.textContent = "Остановить";
+    b.classList.add("btn-ok");
+    rec.ondataavailable = e => { if (e.data.size) ch.push(e.data); };
+    rec.onstop = () => {
+      st.getTracks().forEach(t => t.stop());
+      voiceRec = null;
+      b.textContent = "Записать";
+      voiceBlob = new Blob(ch, { type: rec.mimeType || "audio/webm" });
+      const save = $("#vsave");
+      if (save) save.disabled = false;
+      const stat = $("#vstat");
+      if (stat) stat.textContent = "Запись готова. Проверьте текст эталона и сохраните.";
+    };
+    rec.start();
+    setTimeout(() => { if (voiceRec === rec && rec.state === "recording") rec.stop(); }, 6000);
+  } catch {
+    toast("Нет доступа к микрофону. Откройте через http://localhost — браузер разрешает микрофон только там или по https", "bad");
+  }
+}
+async function voiceSaveRec() {
+  if (!voiceBlob) return;
+  await voiceUpload(voiceBlob, $("#vname").value, "rec.webm");
+}
+async function voiceUpload(blob, name, filename) {
+  const text = ($("#vtext").value || "").trim();
+  if (text.length < 8) { toast("Впишите текст, который звучит в записи", "bad"); return; }
+  const fd = new FormData();
+  fd.append("file", blob, filename || "voice.webm");
+  fd.append("text", text);
+  fd.append("voice_name", (name || "").trim() || "Свой голос");
+  try {
+    const r = await fetch("/api/admin/voices", { method: "POST", headers: { Authorization: "Bearer " + S.token }, body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || ("ошибка " + r.status));
+    voiceBlob = null;
+    toast(`Голос «${j.voice_name || "свой"}» добавлен`, "ok");
+    go("voices");
+  } catch (e) { toast(e.message, "bad"); }
+}
+
 const VIEWS = {
   tasks: viewTasks, pick: viewPick, dds: viewDdsList, progress: viewProgress, spravka: viewSpravka,
   monitor: viewMonitor, scen: viewScen, assign: viewAssign, group: viewGroup, grades: viewGrades, reports: viewReports,
-  system: viewSystem, users: viewUsers, audit: viewAudit, backup: viewBackup, settings: viewSettings,
+  system: viewSystem, users: viewUsers, audit: viewAudit, backup: viewBackup, settings: viewSettings, voices: viewVoices,
 };
 
 boot();

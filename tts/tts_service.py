@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from .scene import ScenePlan, classify
@@ -31,8 +32,17 @@ def _stable_gen_id() -> int:
         return _GEN_ID
 
 
-def render_reply(text: str, keep: bool = False) -> tuple[bytes, dict]:
-    plan: ScenePlan = classify(text)
+def render_reply(text: str, keep: bool = False, *, situaciya: str = "", fio: str = "",
+                 gruppa: str = "", turn: int = 0, voice: str = "",
+                 call_id: str = "", plain: bool = False) -> tuple[bytes, dict]:
+    if plain:
+        spoken = re.sub(r"\s+", " ", (text or "")).strip()
+        plan = ScenePlan(voice or "female_warm", spoken, None, 0.0, True, "plain", False)
+    else:
+        plan = classify(
+            text, sytuacjiya=situaciya, fio=fio, gruppa=gruppa,
+            turn=turn, voice=voice, call_id=call_id,
+        )
     from .f5_engine import OUTPUTS_DIR, synthesize_f5_fast
 
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -105,14 +115,58 @@ def health():
 
 
 @app.get("/tts")
-def tts(text: str):
+def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
+        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0):
     text = (text or "").strip()[:600]
     if not text:
         raise HTTPException(400, "пустой текст")
     try:
-        data, _meta = render_reply(text, keep=False)
+        data, _meta = render_reply(
+            text, keep=False, sytuacjiya=situaciya[:800], fio=fio[:120],
+            gruppa=str(gruppa)[:8], turn=turn, voice=voice[:64],
+            call_id=call_id[:80], plain=bool(plain),
+        )
     except Exception as exc:
         raise HTTPException(500, f"синтез не удался: {exc}") from exc
     if len(data) < 44 or data[:4] != b"RIFF":
         raise HTTPException(500, "синтез вернул не wav")
     return Response(data, media_type="audio/wav")
+
+
+@app.get("/voices")
+def voices():
+    from .f5_engine import VOICES_DIR, get_voices_catalog
+    out = []
+    for vid, info in get_voices_catalog().items():
+        wav = info.get("wav") or ""
+        path = VOICES_DIR / wav if wav else None
+        out.append({
+            "id": vid,
+            "name": info.get("name") or vid,
+            "text": info.get("text") or "",
+            "speaker_type": info.get("speaker_type") or "",
+            "has_audio": bool(path and path.is_file()),
+        })
+    return {"voices": out}
+
+
+@app.get("/voices/{voice_id}/audio")
+def voice_audio(voice_id: str):
+    from .f5_engine import voice_wav_path
+    path = voice_wav_path(voice_id)
+    if path is None:
+        raise HTTPException(404, "эталон не найден")
+    return Response(path.read_bytes(), media_type="audio/wav")
+
+
+@app.post("/voices")
+async def voice_upload(file: UploadFile = File(...), text: str = Form(""), voice_name: str = Form("")):
+    from .f5_engine import save_uploaded_voice
+    raw = await file.read()
+    try:
+        saved = save_uploaded_voice(raw, file.filename or "voice.wav", text, voice_name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, f"не удалось записать голос: {exc}") from exc
+    return saved

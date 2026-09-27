@@ -129,7 +129,12 @@ function ddsView() {
 }
 
 function ddsZapis() { $("#zapBody").scrollIntoView({ behavior: "smooth", block: "center" }); }
-function ddsPlay(i) { new Audio(dl(`/api/voice/tts?text=${encodeURIComponent(DS.zapis[i].tekst)}`)).play().catch(() => {}); }
+function ddsPlay(i) {
+  const z = DS.zapis[i];
+  let url = `/api/voice/tts?text=${encodeURIComponent(z.tekst)}`;
+  if (z.kto !== "operator" && DS.sid) url += `&sid=${encodeURIComponent(DS.sid)}`;
+  new Audio(dl(url)).play().catch(() => {});
+}
 
 function ddsChips() {
   const last = DS.st.length ? DS.st[DS.st.length - 1] : null;

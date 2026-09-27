@@ -9,14 +9,16 @@
 """
 import json
 import os
+import re
 import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import wave
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 VOSK_MODEL = os.environ.get("VOSK_MODEL", "/models/vosk")
@@ -92,10 +94,10 @@ def _piper(text: str) -> bytes:
         return open(out.name, "rb").read()
 
 
-def _f5(text: str) -> bytes | None:
+def _f5(params: dict) -> bytes | None:
     if not F5_URL:
         return None
-    query = urllib.parse.urlencode({"text": text})
+    query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in ("", None)})
     try:
         with urllib.request.urlopen(F5_URL + "/tts?" + query, timeout=35) as resp:
             data = resp.read()
@@ -108,14 +110,81 @@ def _f5(text: str) -> bytes | None:
     return None
 
 
+def _f5_call(method: str, path: str, data: bytes | None = None, headers: dict | None = None, timeout: float = 30):
+    if not F5_URL:
+        raise HTTPException(503, "синтез F5 выключен")
+    req = urllib.request.Request(F5_URL + path, data=data, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.headers.get_content_type()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")[:400]
+        detail = raw
+        try:
+            detail = json.loads(raw).get("detail", raw)
+        except Exception:
+            pass
+        raise HTTPException(exc.code if 400 <= exc.code < 600 else 502, detail or "ошибка F5") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(503, f"F5 недоступен: {exc}") from exc
+
+
 @app.get("/tts")
-def tts(text: str):
+def tts(text: str, situaciya: str = "", fio: str = "", gruppa: str = "",
+        turn: int = 0, voice: str = "", call_id: str = "", plain: int = 0):
     text = (text or "").strip()[:600]
     if not text:
         raise HTTPException(400, "пустой текст")
-    data = _f5(text)
+    data = _f5({
+        "text": text, "situaciya": situaciya, "fio": fio, "gruppa": gruppa,
+        "turn": turn, "voice": voice, "call_id": call_id, "plain": plain or "",
+    })
     if data is None:
         if not os.path.exists(PIPER_MODEL):
             raise HTTPException(503, "синтез не удался")
         data = _piper(text)
     return Response(data, media_type="audio/wav")
+
+
+@app.get("/voices")
+def voices():
+    raw, _ctype = _f5_call("GET", "/voices", timeout=8)
+    return Response(raw, media_type="application/json")
+
+
+@app.get("/voices/{voice_id}/audio")
+def voice_audio(voice_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    raw, ctype = _f5_call("GET", "/voices/" + urllib.parse.quote(voice_id) + "/audio", timeout=15)
+    return Response(raw, media_type=ctype or "audio/wav")
+
+
+def _multipart(fields: dict, filename: str, content: bytes, content_type: str) -> tuple[bytes, str]:
+    boundary = "----t112" + uuid.uuid4().hex
+    chunks = []
+    for key, value in fields.items():
+        chunks.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
+        )
+    safe = (filename or "voice.wav").replace('"', "")
+    chunks.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe}\"\r\n"
+        f"Content-Type: {content_type or 'application/octet-stream'}\r\n\r\n".encode()
+        + content + b"\r\n"
+    )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), "multipart/form-data; boundary=" + boundary
+
+
+@app.post("/voices")
+async def voices_save(file: UploadFile = File(...), text: str = Form(""), voice_name: str = Form("")):
+    raw = await file.read()
+    body, ctype = _multipart(
+        {"text": text or "", "voice_name": voice_name or ""},
+        file.filename or "voice.webm",
+        raw,
+        file.content_type or "application/octet-stream",
+    )
+    data, _ = _f5_call("POST", "/voices", data=body, headers={"Content-Type": ctype}, timeout=40)
+    return Response(data, media_type="application/json")

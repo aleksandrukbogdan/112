@@ -11,6 +11,7 @@ import json
 import asyncio
 import copy
 import os
+import re
 import shutil
 import time
 import uuid
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
@@ -1046,6 +1047,122 @@ def settings(b: Settings, u=Depends(role("admin", "teacher"))):
 
 # ================================================================ голос
 
+def _tts_session(sid: str, u: dict) -> dict | None:
+    s = LIVE.get(sid) or dds.LIVE.get(sid)
+    if not s:
+        return None
+    if s.get("user_id") != u["id"] and u["role"] not in ("teacher", "admin"):
+        return None
+    return s
+
+
+def _caller_turn(s: dict, text: str) -> int:
+    """Номер реплики заявителя: по записи разговора или по живому диалогу."""
+    wanted = (text or "").strip()
+    zapis = [z for z in (s.get("zapis") or []) if z.get("kto") in ("zayavitel", "caller")]
+    if zapis:
+        for i, z in enumerate(zapis, 1):
+            if (z.get("tekst") or "").strip() == wanted:
+                return i
+        return 2
+    live = [m for m in (s.get("dialog") or []) if m.get("kto") == "caller"]
+    return max(1, len(live))
+
+
+def _ticket_params(s: dict, text: str) -> dict:
+    bil = s.get("bilet") or {}
+    z = bil.get("zayavitel") or {}
+    params = {
+        "situaciya": bil.get("situaciya") or "",
+        "fio": z.get("fio") or "",
+        "gruppa": str(bil.get("gruppa") or ""),
+        "turn": _caller_turn(s, text),
+        "call_id": s.get("id") or "",
+    }
+    chosen = db.setting("caller_voice", "auto") or "auto"
+    if isinstance(chosen, str) and chosen not in ("", "auto"):
+        params["voice"] = chosen
+    return params
+
+
+class VoiceChoice(BaseModel):
+    voice_id: str
+
+
+@app.get("/api/admin/voices")
+async def admin_voices(u=Depends(role("admin"))):
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.get(f"{VOICE_URL}/voices")
+            r.raise_for_status()
+            catalog = r.json()
+    except Exception:
+        raise HTTPException(503, "каталог голосов недоступен")
+    selected = db.setting("caller_voice", "auto") or "auto"
+    return {"voices": catalog.get("voices", []), "selected": selected}
+
+
+@app.post("/api/admin/voices/select")
+async def admin_voice_select(b: VoiceChoice, u=Depends(role("admin"))):
+    vid = (b.voice_id or "auto").strip()
+    if vid != "auto":
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", vid):
+            raise HTTPException(400, "неизвестный голос")
+        try:
+            async with httpx.AsyncClient(timeout=10) as cl:
+                r = await cl.get(f"{VOICE_URL}/voices")
+                r.raise_for_status()
+                ids = {v.get("id") for v in r.json().get("voices", [])}
+        except Exception:
+            raise HTTPException(503, "каталог голосов недоступен")
+        if vid not in ids:
+            raise HTTPException(400, "такого голоса нет")
+    db.set_setting("caller_voice", vid)
+    db.audit(u, "voice_select", {"voice": vid})
+    return {"ok": True, "voice_id": vid}
+
+
+@app.get("/api/admin/voices/{voice_id}/audio")
+async def admin_voice_audio(voice_id: str, token: str = ""):
+    u = _auth_q(token)
+    if not u or u.get("role") != "admin":
+        raise HTTPException(403, "недостаточно прав")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", voice_id or ""):
+        raise HTTPException(400, "неизвестный голос")
+    try:
+        async with httpx.AsyncClient(timeout=20) as cl:
+            r = await cl.get(f"{VOICE_URL}/voices/{voice_id}/audio")
+            r.raise_for_status()
+    except Exception:
+        raise HTTPException(503, "эталон недоступен")
+    return Response(r.content, media_type="audio/wav")
+
+
+@app.post("/api/admin/voices")
+async def admin_voice_upload(file: UploadFile = File(...), text: str = Form(""),
+                             voice_name: str = Form(""), u=Depends(role("admin"))):
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(400, "файл больше 15 МБ")
+    try:
+        async with httpx.AsyncClient(timeout=40) as cl:
+            r = await cl.post(f"{VOICE_URL}/voices", data={"text": text, "voice_name": voice_name},
+                              files={"file": (file.filename or "voice.webm", raw,
+                                              file.content_type or "application/octet-stream")})
+    except Exception:
+        raise HTTPException(503, "не удалось сохранить голос")
+    if r.status_code >= 400:
+        detail = "не удалось сохранить голос"
+        try:
+            detail = r.json().get("detail", detail)
+        except Exception:
+            pass
+        raise HTTPException(r.status_code, detail)
+    saved = r.json()
+    db.audit(u, "voice_upload", {"voice": saved.get("voice_id"), "name": saved.get("voice_name")})
+    return saved
+
+
 @app.post("/api/voice/asr")
 async def v_asr(audio: UploadFile = File(...), u=Depends(current_user)):
     """
@@ -1074,13 +1191,28 @@ async def v_asr(audio: UploadFile = File(...), u=Depends(current_user)):
 
 
 @app.get("/api/voice/tts")
-async def v_tts(text: str, token: str = ""):
-    _auth_q(token)
+async def v_tts(text: str, token: str = "", sid: str = "", voice: str = "", plain: int = 0):
+    u = _auth_q(token)
+    if not u:
+        raise HTTPException(401, "требуется вход")
+    params = {"text": text}
+    if plain or voice:
+        if u.get("role") != "admin":
+            raise HTTPException(403, "недостаточно прав")
+        params["plain"] = 1
+        if voice:
+            params["voice"] = voice
+    elif sid:
+        s = _tts_session(sid, u)
+        if s and s.get("bilet"):
+            params.update(_ticket_params(s, text))
     try:
         async with httpx.AsyncClient(timeout=40) as cl:
-            r = await cl.get(f"{VOICE_URL}/tts", params={"text": text})
+            r = await cl.get(f"{VOICE_URL}/tts", params=params)
             r.raise_for_status()
             return Response(r.content, media_type="audio/wav")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(503, "голосовой сервис недоступен")
 
