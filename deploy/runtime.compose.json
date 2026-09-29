@@ -1,0 +1,46 @@
+{
+  "services": {
+    "app": {
+      "environment": {
+        "BACKUP_PERIOD_SEC": "86400",
+        "UCHEBNY_TAYMING_SEC": "30",
+        "ASR_URL": "http://asr:8091",
+        "LLM_BASE_URL": "http://host.docker.internal:1212/v1",
+        "LLM_MODEL": "Qwen3-VL",
+        "DATABASE_URL": "postgresql://t112:t112pass@db:5432/t112",
+        "TEACHER_PASSWORD": "",
+        "LLM_ENABLED": "true",
+        "TRAINEE_PASSWORD": "",
+        "DDS_ETAPY_SEC": "45,25,50",
+        "ADMIN_PASSWORD": "",
+        "DDS_VEROYATNOST_OSHIBKI": "0.7",
+        "ASR_ENGINE": "auto",
+        "VOICE_URL": "http://voice:8090",
+        "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
+        "DATA_DIR": "/app/data",
+        "DB_PATH": "/app/state/t112.db",
+        "BACKUP_DIR": "/app/state/backup",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/data/112/state/app",
+          "target": "/app/state",
+          "read_only": false
+        }
+      ],
+      "image": "t112-release:2026.09.29-verified-local",
+      "command": [
+        "uvicorn",
+        "api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+        "--workers",
+        "1"
+      ]
+    }
+  }
+}

@@ -1,4 +1,3 @@
-
 """
 Тренажёр оператора ДДС · Москва. API.
 
@@ -15,6 +14,7 @@ import re
 import shutil
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import auth, bkt, caller, config as C, db, dds, domain as D, generator, reports
 from .auth import current_user, role
@@ -30,6 +30,7 @@ from . import quality as Q
 from . import session_store as store
 from . import insights
 from . import forecast_ml
+from . import access, curriculum, lessons, helper, training, materials, scenario_tools, analytics
 
 VOICE_URL = os.environ.get("VOICE_URL", "http://voice:8090")      # Vosk (запасной ASR) + Piper (TTS)
 ASR_URL = os.environ.get("ASR_URL", "http://asr:8091")            # GigaAM на GPU — основной ASR
@@ -40,6 +41,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 
 app.include_router(dds.router)
+app.include_router(lessons.router)
+for extra in (helper,training,materials,scenario_tools,analytics):
+    app.include_router(extra.router)
 
 LIVE: dict[str, dict] = {}
 NEED = ["opisanie", "adres_polny", "zayavitel_fio", "zayavitel_telefon", "tip_kod"]
@@ -47,48 +51,67 @@ NEED = ["opisanie", "adres_polny", "zayavitel_fio", "zayavitel_telefon", "tip_ko
 
 @app.middleware("http")
 async def serialize_commands(request, call_next):
-    # LIVE is process-local: deploy exactly ONE API worker. Voice remains parallel.
-    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/voice/"):
-        async with app.state.command_lock:
-            return await call_next(request)
-    return await call_next(request)
+    # No class-wide lock. Atomic state commands lock their own durable records.
+    key = request.headers.get("Idempotency-Key")
+    ctx = None
+    if key and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if len(key)>128:
+            return Response('{"detail":"Invalid command key"}', status_code=422, media_type="application/json")
+        body = await request.body()
+        ctx = {"key":key, "path":request.method+":"+request.url.path, "body_hash":hashlib.sha256(body).hexdigest()}
+    token = store.request_command.set(ctx)
+    try:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        if request.url.path.startswith("/api/"):response.headers["Cache-Control"] = "no-store"
+        return response
+    finally:
+        store.request_command.reset(token)
 
 
 def reload_live():
     LIVE.clear()
     dds.LIVE.clear()
     for row in db.q("SELECT * FROM sessions WHERE state='live'"):
-        state = json.loads(row["data"])
-        # Old unfinished attempts have no historical classifier snapshot.
-        if not state.get("versions"):
-            state["snapshot_origin"] = "upgrade_not_original"
-        (dds.LIVE if row.get("kind") == "dds" else LIVE)[row["id"]] = state
         with db.tx():
-            store.persist(state)
+            row = db.lock_row('sessions','id',row['id'])
+            if row['state'] != 'live':continue
+            state = json.loads(row['data'])
+            if not state.get('versions'):
+                state['snapshot_origin'] = 'upgrade_not_original'
+                store.freeze(state)
+                state['versions']['rubric'] = '112-quality-1'
+                state['_rules']['rubric'] = '112-quality-1'
+                state['versions']['rules'] = store.content('rules',state['_rules'])
+                store.persist(state)
+            (dds.LIVE if row.get('kind') == 'dds' else LIVE)[row['id']] = state
 
 
 # ================================================================ старт
 
 @app.on_event("startup")
 def startup():
-    if int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
-        raise RuntimeError("This patch requires one API worker (LIVE state)")
-    app.state.command_lock = asyncio.Lock()
     db.conn()
-    made = auth.ensure_defaults()
-    if made:
-        print("\n" + "=" * 60 + "\n  ПЕРВЫЙ ЗАПУСК — созданы учётные записи:", flush=True)
-        for m in made:
-            print(f"    {m['role']:8} {m['login']:10} пароль: {m['password']}", flush=True)
-        print("  Смените пароли в разделе «Администрирование».\n" + "=" * 60, flush=True)
-    if not db.q1("SELECT id FROM scenarios WHERE source='bilet' LIMIT 1"):
-        with db.tx() as c:
-            for b in C.load("bilety"):
-                c.execute("INSERT INTO scenarios(id,source,status,data,created,validated,comment) "
-                          "VALUES(?,?,?,?,?,?,?)",
-                          (b["id"], "bilet", "published", json.dumps(b, ensure_ascii=False),
-                           time.time(), time.time(), "банк билетов ДГОЧСиПБ"))
+    with db.tx() as boot_tx:
+        if db.PG:boot_tx.execute('SELECT pg_advisory_xact_lock(112202610)')
+        made = auth.ensure_defaults()
+        if made:
+            print("\n" + "=" * 60 + "\n  ПЕРВЫЙ ЗАПУСК — созданы учётные записи:", flush=True)
+            for m in made:
+                print(f"    {m['role']:8} {m['login']:10} пароль: {m['password']}", flush=True)
+            print("  Смените пароли в разделе «Администрирование».\n" + "=" * 60, flush=True)
+        if not db.q1("SELECT id FROM scenarios WHERE source='bilet' LIMIT 1"):
+            with db.tx() as c:
+                for b in C.load("bilety"):
+                    c.execute("INSERT INTO scenarios(id,source,status,data,created,validated,comment) "
+                              "VALUES(?,?,?,?,?,?,?)",
+                              (b["id"], "bilet", "published", json.dumps(b, ensure_ascii=False),
+                               time.time(), time.time(), "банк билетов ДГОЧСиПБ"))
+        curriculum.migrate_bank()
+        access.bootstrap()
     reload_live()
+    if os.environ.get("SCHEDULER_ENABLED", "true").lower()=="true":lessons.start_scheduler()
     db.start_backup_thread(int(os.environ.get("BACKUP_PERIOD_SEC", 86400)))
 
 
@@ -126,7 +149,7 @@ async def voice_health() -> dict:
     elif not giga and ASR_ENGINE != "vosk":
         note = "GigaAM не запущен (make up-gpu) — распознаёт Vosk" if vosk else None
     return {"ok": bool(engine) and tts, "asr": bool(engine), "tts": tts,
-            "engine": engine, "gigaam": g, "vosk": vosk, "note": note}
+            "engine": engine, "tts_engine": v.get("tts_engine") if v else None, "gigaam": g, "vosk": vosk, "note": note}
 
 
 @app.get("/health")
@@ -136,8 +159,8 @@ async def health():
         dbs = f"{db.backend()} — работает"
     except Exception as e:
         dbs = f"{db.backend()} — ОШИБКА: {e}"[:160]
-    return {"ok": True, "db": dbs, "llm": await caller.zdorov(), "voice": await voice_health(),
-            "svodka": C.svodka(), "zanyatiy_idyot": len(LIVE),
+    return {"ok": "ОШИБКА" not in dbs, "db": dbs, "llm": await caller.zdorov(), "voice": await voice_health(),
+            "svodka": C.svodka(), "zanyatiy_idyot": db.q1("SELECT COUNT(*) n FROM sessions WHERE state='live'")["n"],
             "zaversheno": db.q1("SELECT COUNT(*) n FROM sessions WHERE state='done'")["n"]}
 
 
@@ -268,6 +291,7 @@ def scenarios(status: str | None = None, u=Depends(current_user)):
         rows = db.q("SELECT * FROM scenarios WHERE status=? ORDER BY source, id", (status,))
     else:
         rows = db.q("SELECT * FROM scenarios ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END, source, id")
+    rows=[r for r in rows if u['role']!='teacher' or r['status']=='published' or r.get('created_by') in (None,u['id'])]
     return [Q.public_scenario(_sc(r)) if u["role"] == "trainee" else _sc(r) for r in rows]
 
 
@@ -279,7 +303,7 @@ class Gen(BaseModel):
 
 
 @app.post("/api/scenarios/generate")
-async def gen(b: Gen, u=Depends(role("teacher", "admin"))):
+async def gen(b: Gen, u=Depends(role("teacher"))):
     out = []
     for _ in range(max(1, min(b.kolichestvo, 5))):
         try:
@@ -305,8 +329,7 @@ def validate(sid: str, b: Valid, u=Depends(role("teacher"))):
     if b.status not in ("published", "rejected"):
         raise HTTPException(400, "status: published | rejected")
     row = db.q1("SELECT * FROM scenarios WHERE id=?", (sid,))
-    if not row:
-        raise HTTPException(404, "нет сценария")
+    access.scenario(u,row,edit=True)
     data = json.loads(row["data"])
     if b.data:
         for k in ("situaciya", "adres_vidimy", "adres_etalon", "slozhnost"):
@@ -315,6 +338,8 @@ def validate(sid: str, b: Valid, u=Depends(role("teacher"))):
         if isinstance(b.data.get("zayavitel"), dict):
             data["zayavitel"].update(b.data["zayavitel"])
         data["trebuet_utochneniya"] = data["adres_vidimy"].strip() != data["adres_etalon"].strip()
+    errors=curriculum.validate(data)
+    if b.status=="published" and errors:raise HTTPException(422,errors)
     db.ex("UPDATE scenarios SET status=?,data=?,validated_by=?,validated=?,comment=? WHERE id=?",
           (b.status, json.dumps(data, ensure_ascii=False), u["id"], time.time(), b.comment, sid))
     db.audit(u, f"scenario_{b.status}", {"id": sid, "comment": b.comment})
@@ -325,8 +350,9 @@ def validate(sid: str, b: Valid, u=Depends(role("teacher"))):
 
 @app.get("/api/groups")
 def groups(u=Depends(role("admin", "teacher"))):
-    return db.q("SELECT g.*, (SELECT COUNT(*) FROM users WHERE group_id=g.id AND role='trainee') n "
+    rows = db.q("SELECT g.*, (SELECT COUNT(*) FROM users WHERE group_id=g.id AND role='trainee') n "
                 "FROM groups g ORDER BY name")
+    return rows if u["role"]=="admin" else [r for r in rows if r["id"] in access.groups(u)]
 
 
 class NewGroup(BaseModel):
@@ -347,8 +373,9 @@ def add_group(b: NewGroup, u=Depends(role("admin"))):
 
 @app.get("/api/users")
 def users(u=Depends(role("admin", "teacher"))):
-    return db.q("SELECT u.id,u.login,u.name,u.role,u.group_id,u.active,g.name AS gruppa "
+    rows = db.q("SELECT u.id,u.login,u.name,u.role,u.group_id,u.active,g.name AS gruppa "
                 "FROM users u LEFT JOIN groups g ON g.id=u.group_id ORDER BY u.role,u.name")
+    return rows if u["role"]=="admin" else [r for r in rows if r["group_id"] in access.groups(u) or r["id"]==u["id"]]
 
 
 class NewUser(BaseModel):
@@ -413,6 +440,7 @@ def assignments(u=Depends(current_user)):
     else:
         rows = db.q("SELECT a.*, g.name gruppa FROM assignments a "
                     "LEFT JOIN groups g ON g.id=a.group_id ORDER BY a.created DESC")
+    if u["role"]=="teacher":rows=[r for r in rows if r["group_id"] in access.groups(u)]
     for r in rows:
         sc = db.q1("SELECT * FROM scenarios WHERE id=?", (r["scenario_id"],))
         r["scenario"] = _sc(sc) if sc else None
@@ -439,6 +467,7 @@ class NewAssign(BaseModel):
 
 @app.post("/api/assignments")
 def add_assign(b: NewAssign, u=Depends(role("teacher"))):
+    access.group(u,b.group_id)
     n = 0
     for sid in b.scenario_ids:
         row = db.q1("SELECT status FROM scenarios WHERE id=?", (sid,))
@@ -455,6 +484,10 @@ def add_assign(b: NewAssign, u=Depends(role("teacher"))):
 
 @app.delete("/api/assignments/{aid}")
 def del_assign(aid: int, u=Depends(role("teacher"))):
+    row=db.q1("SELECT * FROM assignments WHERE id=?",(aid,))
+    if not row:raise HTTPException(404,"Назначение не найдено")
+    access.group(u,row["group_id"])
+    if row["created_by"]!=u["id"]:raise HTTPException(403,"Чужое назначение")
     db.ex("DELETE FROM assignments WHERE id=?", (aid,))
     db.audit(u, "assign_delete", {"id": aid})
     return {"ok": True}
@@ -467,17 +500,15 @@ def _persist(sid: str) -> None:
 
 
 def _live(sid: str, u: dict) -> dict:
-    s = LIVE.get(sid)
-    if not s:
-        raise HTTPException(404, "занятие не найдено или уже завершено")
-    if s["user_id"] != u["id"]:
-        raise HTTPException(403, "чужое занятие")
+    s=store.load(sid,u,"ops112")
+    LIVE[sid]=s
     return s
 
 
 class Start(BaseModel):
     scenario_id: str
     assignment_id: int | None = None
+    lesson_id: str | None = None
 
 
 @app.post("/api/session")
@@ -486,14 +517,20 @@ def start(b: Start, u=Depends(role("trainee", "teacher"))):
     row = db.q1("SELECT * FROM scenarios WHERE id=?", (b.scenario_id,))
     if not row or (row["status"] != "published" and u["role"] == "trainee"):
         raise HTTPException(404, "сценарий недоступен")
-    sc = json.loads(row["data"])
-    tm = tayming()
+    sc = curriculum.enrich(json.loads(row["data"]))
+    if lessons.dispatch_item.get():sc=curriculum.enrich(lessons.dispatch_item.get()["data"])
+    policy=lessons.start_policy(u,b.lesson_id,b.scenario_id,"ops112")
+    tm = policy.get("card_sec", tayming())
     a = store.assignment(b.assignment_id, u, b.scenario_id, "ops112")
     if a and a["tayming_sec"]:
         tm = a["tayming_sec"]
     sid = str(uuid.uuid4())
     s = {"id": sid, "user_id": u["id"], "bilet": sc, "scenario_id": b.scenario_id,
-         "assignment_id": b.assignment_id, "nachalo": time.time(), "dialog": [],
+         "assignment_id": b.assignment_id, "kind":"ops112", "nachalo": time.time(), "dialog": [],
+         "lesson_id":b.lesson_id, "lesson_policy":policy, "mode":policy.get("mode","practice"),
+         "source_kind":(lessons.dispatch_item.get() or {}).get("source","system"),
+         "source_session":(lessons.dispatch_item.get() or {}).get("source_session"),
+         "helper":{"allowed":policy.get("helper_allowed",True),"enabled":False,"exposed":False},
          "kartochka": {}, "narusheniya_rechi": [], "t_adres_ms": None, "t_tip_ms": None,
          "t_otpravki_sec": None, "adres_raskryt": False, "tayming_sec": tm}
     LIVE[sid] = s
@@ -502,7 +539,8 @@ def start(b: Start, u=Depends(role("trainee", "teacher"))):
           "VALUES(?,?,?,?,?,?,?)", (sid, u["id"], b.scenario_id, b.assignment_id,
                                     s["nachalo"], "live", json.dumps(s, ensure_ascii=False)))
     store.event(s, "session_started", {"versions": s["versions"], "kind": "ops112"})
-    return {"session_id": sid, "privetstvie": "Служба 112, оператор слушает вас.",
+    store.snapshot(s)
+    return {"session_id": sid, "started":s["nachalo"], "server_time":time.time(), "privetstvie": "Служба 112, оператор слушает вас.",
             "normativ_sec": C.NORM["kartochka_sec"], "tayming_sec": tm,
             "scenario": {k: sc.get(k) for k in ("id", "bilet", "vyzov", "slozhnost",
                                                  "situaciya", "trebuet_utochneniya")}}
@@ -514,34 +552,46 @@ class Replika(BaseModel):
 
 @app.post("/api/session/{sid}/replika")
 async def replika(sid: str, b: Replika, u=Depends(current_user)):
-    original = _live(sid, u)
-    s = copy.deepcopy(original)
-    t_ms = int((time.time() - s["nachalo"]) * 1000)
-    nar = D.proverit_rech(b.tekst, s.get("_rules", {}).get("speech"))
-    if nar:
-        s["narusheniya_rechi"].extend([{**n, "t_ms": t_ms} for n in nar])
-    s["dialog"].append({"kto": "operator", "tekst": b.tekst, "t_ms": t_ms})
-    bil = s["bilet"]
-    utoch = bil["trebuet_utochneniya"] and caller.est_utochnenie(b.tekst)
-    if utoch:
-        s["adres_raskryt"] = True
-    otv = await caller.otvet(bil, s["dialog"], b.tekst, stress=min(5, bil["slozhnost"]))
-    s["dialog"].append({"kto": "caller", "tekst": otv,
-                        "t_ms": int((time.time() - s["nachalo"]) * 1000)})
+    if not b.tekst.strip() or len(b.tekst)>5000:raise HTTPException(422,"Реплика: от 1 до 5000 символов")
+    turn=uuid.uuid4().hex
+    with db.tx():
+        db.lock_row("sessions","id",sid)
+        cached=store.receipt(u["id"])
+        if cached is not None:return cached
+        s=_live(sid,u)
+        if s.get("pending_reply") and time.time()-s["pending_reply"]["ts"]<90:
+            raise HTTPException(409,"Предыдущая реплика ещё обрабатывается")
+        t_ms=int((time.time()-s["nachalo"])*1000)
+        nar=D.proverit_rech(b.tekst,s.get("_rules",{}).get("speech"))
+        s["narusheniya_rechi"].extend([{**n,"t_ms":t_ms} for n in nar])
+        s["dialog"].append({"id":turn,"kto":"operator","tekst":b.tekst,"t_ms":t_ms})
+        bil=copy.deepcopy(s["bilet"])
+        utoch=bil["trebuet_utochneniya"] and caller.est_utochnenie(b.tekst)
+        if utoch:s["adres_raskryt"]=True
+        s["pending_reply"]={"id":turn,"ts":time.time()}
+        store.persist(s);history=copy.deepcopy(s["dialog"])
     try:
-        with db.tx():
-            store.persist(s)
-        LIVE[sid] = s
+        otv=await caller.otvet(bil,history,b.tekst,stress=min(5,bil["slozhnost"]))
     except Exception:
-        LIVE[sid] = original
-        raise
-    return {"otvet": otv, "narusheniya_rechi": nar, "adres_raskryt": s["adres_raskryt"],
-            "podskazka": "Заявитель уточнил адрес — внесите его в карточку" if utoch else None}
+        otv=caller._bez_llm(bil,b.tekst,utoch)
+    with db.tx():
+        db.lock_row("sessions","id",sid)
+        s=_live(sid,u)
+        if s.get("pending_reply",{}).get("id")!=turn:raise HTTPException(409,"Ответ устарел")
+        s.pop("pending_reply",None)
+        s["dialog"].append({"id":uuid.uuid4().hex,"kto":"caller","tekst":otv,"t_ms":int((time.time()-s["nachalo"])*1000)})
+        store.persist(s);LIVE[sid]=s
+        answer={"otvet":otv,"narusheniya_rechi":nar,"adres_raskryt":s["adres_raskryt"],"podskazka":None}
+        store.save_receipt(u["id"],answer)
+    return answer
 
 
 class Pole(BaseModel):
     key: str
     value: Any
+    expected_version: int | None = None
+    client_id: str | None = Field(default=None,max_length=100)
+    client_seq: int | None = Field(default=None,ge=0)
 
 
 def _pereschitat(s: dict) -> dict:
@@ -571,6 +621,13 @@ def _pereschitat(s: dict) -> dict:
 def pole(sid: str, b: Pole, u=Depends(current_user)):
     Q.validate_card({b.key: b.value})
     s = _live(sid, u)
+    if b.expected_version is not None and b.expected_version != s.get("field_versions",{}).get(b.key,0):
+        raise HTTPException(409,"Поле изменилось: обновите карточку")
+    if b.client_id and b.client_seq is not None:
+        stamp=b.client_id+":"+b.key
+        prior=s.setdefault('manual_sequences',{}).get(stamp,-1)
+        if b.client_seq<=prior:return {"ok":True,"ignored_stale":True,"field_versions":s.get('field_versions',{})}
+        s['manual_sequences'][stamp]=b.client_seq
     t_ms = int((time.time() - s["nachalo"]) * 1000)
     s["kartochka"][b.key] = b.value
     if b.key == "adres_polny" and s["t_adres_ms"] is None and str(b.value).strip():
@@ -579,7 +636,7 @@ def pole(sid: str, b: Pole, u=Depends(current_user)):
         s["t_tip_ms"] = t_ms
     avto = _pereschitat(s) if b.key in ("tip_kod", "postradavshie", "pravonarushenie") else {}
     _persist(sid)
-    return {"ok": True, "avto": avto}
+    return {"ok": True, "avto": avto, "field_versions":s.get("field_versions",{}), "revision":s.get("revision")}
 
 
 @app.get("/api/session/{sid}/prognoz")
@@ -614,7 +671,7 @@ def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
         s["kartochka"]["sluzhby"] = b.sluzhby
     _persist(sid)
     oc = D.ocenit(s)
-    itog = {"t_sec": t, "v_normativ": t <= s["_rules"]["norm"]["kartochka_sec"], **oc}
+    itog = {"t_sec": t, "v_normativ": t <= s["_rules"]["norm"]["kartochka_sec"], "assisted":bool(s.get("helper",{}).get("exposed")), "mode":s.get("mode","practice"), "parent_session":s.get("parent_session"), **oc}
 
     for f in db.q("SELECT * FROM forecasts WHERE kind='call' AND subject=? AND fakt IS NULL", (sid,)):
         p = json.loads(f["data"])
@@ -624,7 +681,7 @@ def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
                1 if verno else 0, f["id"]))
 
     prof, att = {}, None
-    if u["role"] == "trainee":
+    if u["role"] == "trainee" and store.independent(s) and oc.get('rubric_version')==Q.RUBRIC_VERSION:
         prof = bkt.primenit(u["id"], oc["fakty"])
         att = bkt.prognoz_attestacii(u["id"])
         # A best-case BKT count is not a time-to-attestation prediction.
@@ -637,7 +694,7 @@ def otpravit(sid: str, b: Otpravka, u=Depends(current_user)):
 
 @app.get("/api/session/{sid}/razbor")
 def razbor(sid: str, u=Depends(current_user)):
-    r = db.q1("SELECT * FROM sessions WHERE id=?", (sid,))
+    r = access.session(u,sid)
     if not r:
         raise HTTPException(404, "нет занятия")
     if u["role"] == "trainee" and r["user_id"] != u["id"]:
@@ -654,6 +711,9 @@ def razbor(sid: str, u=Depends(current_user)):
                 "SELECT * FROM session_events WHERE session_id=? ORDER BY seq",(sid,))],
             "reviews": [{**e,"data":json.loads(e["data"])} for e in db.q(
                 "SELECT * FROM evidence_reviews WHERE session_id=? ORDER BY revision",(sid,))],
+            "ai_analysis":d.get("ai_analysis"), "helper":d.get("helper"), "parent_session":d.get("parent_session"),
+            "snapshot_points":[r["seq"] for r in db.q("SELECT seq FROM session_snapshots WHERE session_id=? ORDER BY seq",(sid,))],
+            "helper_proposals":[{**p,"data":json.loads(p["data"]),"decision":json.loads(p["decision"]) if p["decision"] else None,"reviewed":json.loads(p["reviewed"]) if p["reviewed"] else None} for p in db.q("SELECT * FROM helper_proposals WHERE session_id=? ORDER BY created",(sid,))],
             "calls": d.get("zvonki", []),
             "dialog": d.get("dialog", []), "kartochka": d.get("kartochka", {}),
             "bilet": d.get("bilet"),
@@ -674,12 +734,14 @@ class EvidenceReview(BaseModel):
 
 @app.post("/api/session/{sid}/review")
 def review_evidence(sid: str, b: EvidenceReview, u=Depends(role("teacher"))):
+    access.session(u,sid,completed=True)
     return insights.review(sid, b.changes, b.reason, u)
 
 
 @app.get("/api/insights/{uid}")
 def user_insights(uid: int, kind: str = "ops112", u=Depends(current_user)):
     uid = uid or u["id"]
+    access.learner(u,uid)
     if u["role"] == "trainee" and uid != u["id"]:
         raise HTTPException(403, "Чужая аналитика")
     if kind not in Q.PROGRAMS:
@@ -690,7 +752,7 @@ def user_insights(uid: int, kind: str = "ops112", u=Depends(current_user)):
 @app.post("/api/session/{sid}/override")
 def override(sid: str, b: Override, u=Depends(role("teacher"))):
     """ТЗ: оценку меняет только преподаватель, с записью в журнал. Администратор — нет."""
-    r = db.q1("SELECT * FROM sessions WHERE id=? AND state='done'", (sid,))
+    r = access.session(u,sid,completed=True)
     if not r:
         raise HTTPException(404, "занятие не найдено или не завершено")
     if not (0 <= b.ball <= 100) or len(b.reason.strip()) < 5:
@@ -704,32 +766,26 @@ def override(sid: str, b: Override, u=Depends(role("teacher"))):
 
 @app.get("/api/live")
 def live(u=Depends(role("teacher"))):
-    out = []
-    for s in list(LIVE.values()):
-        usr = db.q1("SELECT name FROM users WHERE id=?", (s["user_id"],))
-        k = s["kartochka"]
-        out.append({"id": s["id"], "user": usr["name"] if usr else "?",
-                    "scenario": s["scenario_id"], "t_sec": round(time.time() - s["nachalo"], 1),
-                    "poley": sum(1 for x in NEED if str(k.get(x, "")).strip()),
-                    "vsego_poley": len(NEED), "replik": len(s["dialog"]),
-                    "adres_raskryt": s["adres_raskryt"],
-                    "narusheniy": len(s["narusheniya_rechi"]), "sluzhby": k.get("sluzhby", []),
-                    "posledneye": s["dialog"][-1]["tekst"][:90] if s["dialog"] else "",
-                    "rezhim": "112"})
-    return sorted(out + dds.live_rows(), key=lambda x: -x["t_sec"])
+    items=analytics.monitor(u=u)["cards"]
+    return [{**r,"user":r["name"],"rezhim":r["kind"],"t_sec":r["elapsed"],"narusheniy":0} for r in items]
 
 
 # ================================================================ аналитика
 
-def _done(user_id=None, group_id=None, kind="ops112") -> list[dict]:
+def _done(user_id=None, group_id=None, kind=None, actor=None) -> list[dict]:
     sql = ("SELECT s.* FROM sessions s JOIN users u ON u.id=s.user_id "
-           "WHERE s.state='done' AND u.role='trainee' AND s.kind=?")
-    args: list = [kind]
+           "WHERE s.state='done' AND u.role='trainee'")
+    args: list = []
+    if kind:
+        sql += " AND s.kind=?"; args.append(kind)
     if user_id:
         sql += " AND s.user_id=?"; args.append(user_id)
     if group_id:
         sql += " AND u.group_id=?"; args.append(group_id)
     rows = db.q(sql + " ORDER BY s.finished", tuple(args))
+    if actor and actor["role"]=="teacher":
+        permitted=access.groups(actor)
+        rows=[r for r in rows if db.q1("SELECT group_id FROM users WHERE id=?",(r["user_id"],))["group_id"] in permitted]
     for r in rows:
         r["itog"] = insights.effective(r)
         r["gruppa"] = json.loads(r["data"])["bilet"]["gruppa"]
@@ -830,12 +886,14 @@ def an_me(u=Depends(role("trainee"))):
 
 @app.get("/api/analytics/user/{uid}")
 def an_user(uid: int, u=Depends(role("teacher"))):
+    access.learner(u,uid)
     return _an_user(uid)
 
 
 @app.get("/api/analytics/group/{gid}")
 def an_group(gid: int, u=Depends(role("teacher", "admin"))):
-    rows = _done(group_id=gid)
+    access.group(u,gid)
+    rows = _done(group_id=gid,actor=u)
     members = db.q("SELECT id,name,login FROM users WHERE group_id=? AND role='trainee' ORDER BY name",
                    (gid,))
     table = []
@@ -864,6 +922,7 @@ def an_group(gid: int, u=Depends(role("teacher", "admin"))):
 def drill(ids: str, u=Depends(role("teacher"))):
     out = []
     for sid in ids.split(",")[:30]:
+        access.session(u,sid)
         r = db.q1("SELECT s.id,s.scenario_id,s.ball,s.t_sec,s.finished,u.name "
                   "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?", (sid,))
         if r:
@@ -875,7 +934,7 @@ def drill(ids: str, u=Depends(role("teacher"))):
 
 @app.get("/api/otchet/forma1")
 def forma1(u=Depends(role("teacher", "admin"))):
-    rows = _done()
+    rows = _done(kind="ops112",actor=u)
     ts = [r["t_sec"] for r in rows] or [0]
     n = C.NORM
     S = lambda i, name, tr, f=None: {"n": i, "nazvanie": name, "trebovanie": tr, "fakt": f}
@@ -896,7 +955,7 @@ def forma1(u=Depends(role("teacher", "admin"))):
 
 @app.get("/api/otchet/forma2")
 def forma2(u=Depends(role("teacher", "admin"))):
-    rows = _done()
+    rows = _done(kind="ops112",actor=u)
     sch: dict[str, int] = {}
     for x in rows:
         for f in x["itog"]["fakty"]:
@@ -914,13 +973,15 @@ def _auth_q(token: str) -> dict:
     uid = auth.read_token(token)
     if not uid:
         raise HTTPException(401, "требуется вход")
-    return db.q1("SELECT id,login,name,role,group_id FROM users WHERE id=?", (uid,))
+    user=db.q1("SELECT id,login,name,role,group_id FROM users WHERE id=? AND active=1", (uid,))
+    if not user:raise HTTPException(401,"Учётная запись отключена")
+    return user
 
 
 @app.get("/api/otchet/zanyatie/{sid}.pdf")
 def pdf_lesson(sid: str, token: str = ""):
     u = _auth_q(token)
-    r = db.q1("SELECT * FROM sessions WHERE id=? AND state='done'", (sid,))
+    r = access.session(u,sid,completed=True)
     if not r:
         raise HTTPException(404, "нет завершённого занятия")
     if u["role"] == "trainee" and r["user_id"] != u["id"]:
@@ -935,8 +996,7 @@ def pdf_lesson(sid: str, token: str = ""):
 @app.get("/api/otchet/sertifikat/{uid}.pdf")
 def pdf_cert(uid: int, token: str = ""):
     u = _auth_q(token)
-    if u["role"] == "trainee" and uid != u["id"]:
-        raise HTTPException(403, "чужой сертификат")
+    access.learner(u,uid)
     rows = _done(user_id=uid)
     if not rows:
         raise HTTPException(400, "нет завершённых занятий")
@@ -954,7 +1014,8 @@ def xlsx(token: str = "", group_id: int | None = None):
     u = _auth_q(token)
     if u["role"] not in ("teacher", "admin"):
         raise HTTPException(403, "недостаточно прав")
-    rows = _done(group_id=group_id)
+    if group_id:access.group(u,group_id)
+    rows = _done(group_id=group_id,actor=u)
     us = {x["id"]: x for x in db.q("SELECT id,name FROM users")}
     return Response(reports.excel(rows, us),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -974,7 +1035,9 @@ def all_sessions(group_id: int | None = None, u=Depends(role("teacher"))):
     args: tuple = ()
     if group_id:
         sql += " AND u.group_id=?"; args = (group_id,)
-    return db.q(sql + " ORDER BY s.finished DESC LIMIT 300", args)
+    rows=db.q(sql + " ORDER BY s.finished DESC LIMIT 300", args)
+    permitted=access.groups(u)
+    return [r for r in rows if db.q1("SELECT u.group_id FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.id=?",(r["id"],))["group_id"] in permitted]
 
 
 # ================================================================ администрирование
@@ -1393,3 +1456,28 @@ def static(name: str):
     if f.suffix not in (".js", ".css") or not f.exists():
         raise HTTPException(404)
     return FileResponse(f, media_type="application/javascript" if f.suffix == ".js" else "text/css")
+
+
+@app.get("/readyz")
+def readyz():
+    db.q1("SELECT 1 AS n")
+    return {"ok":True,"release":"2026.09.28-plan","rubric":Q.RUBRIC_VERSION,"database":db.backend()}
+
+
+class ScopeGrant(BaseModel):
+    teacher_id:int
+    group_id:int
+    allowed:bool=True
+
+@app.get("/api/admin/scopes")
+def get_scopes(u=Depends(role("admin"))):
+    return db.q("SELECT * FROM teacher_groups")
+
+@app.post("/api/admin/scopes")
+def set_scope(b:ScopeGrant,u=Depends(role("admin"))):
+    if not db.q1("SELECT id FROM users WHERE id=? AND role='teacher'",(b.teacher_id,)) or not db.q1("SELECT id FROM groups WHERE id=?",(b.group_id,)):
+        raise HTTPException(422,"Выберите существующих преподавателя и группу")
+    if b.allowed:db.ex("INSERT INTO teacher_groups(teacher_id,group_id) VALUES(?,?) ON CONFLICT DO NOTHING",(b.teacher_id,b.group_id))
+    else:db.ex("DELETE FROM teacher_groups WHERE teacher_id=? AND group_id=?",(b.teacher_id,b.group_id))
+    db.audit(u,"group_scope",b.model_dump())
+    return {"ok":True}

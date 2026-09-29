@@ -240,6 +240,10 @@ B = [
   "МКАД между 74 и 68 км",None,"14",3),
 ]
 
+from api import curriculum
+from api import config as C
+C.DATA = Path(__file__).parent / "data"
+
 out = []
 for bn, vn, sit, fio, tel, av, ae, grp, slozh in B:
     out.append({
@@ -254,6 +258,14 @@ for bn, vn, sit, fio, tel, av, ae, grp, slozh in B:
         "slozhnost": slozh,
     })
 
+# Preserve vetted corrections/metadata when rebuilding from the original transcription.
+previous = {x["id"]: x for x in json.loads((C.DATA / "bilety.json").read_text())} if (C.DATA / "bilety.json").exists() else {}
+for i, item in enumerate(out):
+    old=previous.get(item["id"], {})
+    if old.get("source_ref", {}).get("address_correction"):
+        item["adres_etalon"]=old["adres_etalon"]
+    out[i]=curriculum.enrich(item)
+    if old.get("source_ref"):out[i]["source_ref"]=old["source_ref"]
 Path("data").mkdir(exist_ok=True)
 Path("data/bilety.json").write_text(
     json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")

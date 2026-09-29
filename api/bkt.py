@@ -1,7 +1,10 @@
 """BKT baseline; mastery is model state, not certified readiness."""
 import time
 from . import db
-from .quality import PROGRAMS, FAKT_SKILL
+from .quality import PROGRAMS, FAKT_SKILL, RUBRIC_VERSION
+
+def skill_key(kind, skill):
+    return kind + ":" + RUBRIC_VERSION + ":" + skill
 
 P_INIT, P_LEARN, P_GUESS, P_SLIP = .1, .1, .25, .1
 MASTERY = .95
@@ -28,7 +31,7 @@ def profil(uid, kind="ops112"):
     have = {r["skill"]: r for r in db.q("SELECT skill,p,n FROM bkt WHERE user_id=?", (uid,))}
     out = {}
     for skill in PROGRAMS[kind]:
-        r = have.get(kind + ":" + skill)
+        r = have.get(skill_key(kind, skill))
         p, n = (float(r["p"]), int(r["n"])) if r else (P_INIT, 0)
         out[skill] = {"p": round(p, 6), "n": n, "osvoen": n > 0 and p >= MASTERY,
                       "status": "not_observed" if not n else ("mastered" if p >= MASTERY else "practice"),
@@ -43,7 +46,7 @@ def primenit(uid, fakty, kind="ops112"):
             observations.setdefault(skill, []).append(bool(f["proyden"]))
     have = {r["skill"]: r for r in db.q("SELECT skill,p,n FROM bkt WHERE user_id=?", (uid,))}
     for skill, values in observations.items():
-        key = kind + ":" + skill
+        key = skill_key(kind, skill)
         old = have.get(key, {"p": P_INIT, "n": 0})
         p = obnovit(old["p"], all(values))
         db.ex("INSERT INTO bkt(user_id,skill,p,n,updated) VALUES(?,?,?,?,?) "

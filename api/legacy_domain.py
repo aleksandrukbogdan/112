@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 from . import config as C
-from . import quality as Q
+from . import legacy_quality as Q
 
 # ---------------------------------------------------------------- адрес
 
@@ -222,16 +222,8 @@ def postroit_grafu(sess: dict) -> list[Fakt]:
 
 def ocenit(sess: dict) -> dict:
     """Оценка из графа. Никаких моделей — только веса фактов."""
-    if sess.get("versions",{}).get("rubric")=="112-quality-1":
-        from . import legacy_domain
-        return legacy_domain.ocenit(sess)
     fakty = postroit_grafu(sess)
-    rules=sess.get("_rules",{}).get("grading",{})
-    if sess.get("versions",{}).get("rubric")=="112-quality-1":
-        return Q.result(fakty,"ops112",version="112-quality-1")
-    for fact in fakty:fact.ves=rules.get("weights",{}).get(fact.kod,fact.ves)
-    return {**Q.result(fakty,"ops112",critical=rules.get("critical"),threshold=rules.get("threshold",70)),
-            "ai_analysis":sess.get("ai_analysis")}
+    return Q.result(fakty, "ops112")
 
 
 # ---------------------------------------------------------------- прогноз

@@ -1,20 +1,18 @@
 """Conservative checks. Unknown address structure requires review, not fuzzy acceptance."""
 import re
 import unicodedata
-from collections import Counter
 
-RUBRIC_VERSION = "112-quality-2"
+RUBRIC_VERSION = "112-quality-1"
 PROGRAMS = {
     "ops112": ("adres", "tip", "sluzhby", "tayming", "polnota", "rech"),
-    "dds": ("podtverzhdenie", "peredacha", "statusy", "rech", "grammatika"),
-    "dds_check": ("podtverzhdenie", "proverka", "peredacha", "statusy", "rech"),
+    "dds": ("podtverzhdenie", "proverka", "peredacha", "statusy", "rech"),
 }
 FAKT_SKILL = {
     "adres": "adres", "tip": "tip", "sluzhby": "sluzhby", "normativ": "tayming",
     "polnota": "polnota", "rech": "rech", "podtverzhdenie": "podtverzhdenie",
     "proverka": "proverka", "lozhnye": "proverka", "peredacha": "peredacha",
     "po_faktu": "statusy", "svoevremenno": "statusy", "zaversheno": "statusy",
-    "kommentarii": "statusy", "etapy": "statusy", "grammatika": "grammatika",
+    "kommentarii": "statusy",
 }
 
 def normalized(text):
@@ -22,13 +20,12 @@ def normalized(text):
 
 def address_parts(text):
     s = normalized(text)
-    s = re.sub(r"\bмо\b", "московская область", s)
     # Numeric street names remain in the street component. Unit labels preserve roles.
     patterns = {
-        "house": r"(?<!\w)(?:дом|д\.?)(?![а-яa-z])\s*([0-9]+[а-яa-z]?(?:[/-][0-9]+[а-яa-z]?)?)",
+        "house": r"(?<!\w)(?:дом|д\.)\s*([0-9]+[а-яa-z]?(?:[/-][0-9]+[а-яa-z]?)?)",
         "corpus": r"(?<!\w)(?:корпус|корп\.?|к\.)\s*([0-9]+[а-яa-z]?)",
         "building": r"(?<!\w)(?:строение|стр\.?)\s*([0-9]+[а-яa-z]?)",
-        "apartment": r"(?<!\w)(?:квартира|кв\.?)(?![а-яa-z])\s*([0-9]+[а-яa-z]?)",
+        "apartment": r"(?<!\w)(?:квартира|кв\.)\s*([0-9]+[а-яa-z]?)",
         "km": r"(?<!\w)([0-9]+(?:[.,][0-9]+)?)\s*км\b",
     }
     parts = {}
@@ -40,7 +37,7 @@ def address_parts(text):
     # Expand road types rather than remove them: улица and переулок differ.
     for a, b in [(r"\bул\.", "улица"), (r"\bпросп\.", "проспект"),
                  (r"\bпер\.", "переулок"), (r"\bш\.", "шоссе"),
-                 (r"\bг\.", "город"), (r"\bобл\.?\b", "область"), (r"\bдер\.?\b", "деревня")]:
+                 (r"\bг\.", "город"), (r"\bобл\.", "область")]:
         s = re.sub(a, b, s)
     s = re.sub(r"\bгород\b", " ", s)
     parts["location"] = tuple(re.findall(r"[\w/-]+", s))
@@ -53,9 +50,7 @@ def compare_address(value, expected, spoken=False):
         if key == "location" and spoken:
             # Speech includes other words; require the complete location phrase in order.
             want, got = b[key], a[key]
-            good = bool(want) and not (Counter(want) - Counter(got))
-        elif key == "location":
-            good = Counter(a.get(key,())) == Counter(b.get(key,()))
+            good = bool(want) and any(got[i:i+len(want)] == want for i in range(len(got)))
         else:
             good = a.get(key) == b.get(key)
         if not good:
@@ -76,14 +71,13 @@ def routes(position, card):
         out.add("MVD")
     return sorted(out)
 
-def result(facts, kind, critical=None, version=None, threshold=70):
-    required = set(critical if critical is not None else ({"adres", "tip", "sluzhby", "polnota"} if kind == "ops112"
+def result(facts, kind, critical=None):
+    required = set(critical or ({"adres", "tip", "sluzhby", "polnota"} if kind == "ops112"
                    else {"podtverzhdenie", "proverka", "peredacha", "po_faktu", "zaversheno"}))
     observed = [f for f in facts if f.proyden is not None]
     total = sum(f.ves for f in observed) or 1
     earned = sum(f.ves for f in observed if f.proyden)
-    failed = sorted(f.kod for f in facts if f.kod in required and f.proyden is False)
-    pending = sorted(required - {f.kod for f in facts if f.proyden is not None})
+    failed = sorted(required - {f.kod for f in facts if f.proyden is True})
     skills = {}
     for f in observed:
         sk = FAKT_SKILL.get(f.kod)
@@ -93,10 +87,9 @@ def result(facts, kind, critical=None, version=None, threshold=70):
     return {"ball": ball, "nabrano": earned, "vsego": total,
             "fakty": [f.to_dict() for f in facts],
             "navyki": {sk: sum(v)/len(v) for sk,v in skills.items()},
-            "critical_errors": failed, "pending_criteria": pending, "review_required": bool(pending), "passed": ball >= threshold and not failed and not pending,
-            "verdikt": "требуется проверка" if pending else ("зачёт" if ball >= threshold and not failed else "не зачтено"),
-            "rubric_version": version or RUBRIC_VERSION, "kind": kind,
-            "critical_codes": sorted(required), "pass_threshold": threshold}
+            "critical_errors": failed, "passed": ball >= 70 and not failed,
+            "verdikt": "зачёт" if ball >= 70 and not failed else "не зачтено",
+            "rubric_version": RUBRIC_VERSION, "kind": kind}
 
 def public_scenario(data):
     return {k: data.get(k) for k in ("id", "nazvanie", "bilet", "vyzov", "situaciya",

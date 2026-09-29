@@ -29,7 +29,10 @@ def _secret() -> bytes:
     f = db.DB_PATH.parent / "secret.key"
     if not f.exists():
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(secrets.token_hex(32))
+        try:
+            fd=os.open(f,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(fd,'w') as out:out.write(secrets.token_hex(32))
+        except FileExistsError:pass
     return f.read_text().strip().encode()
 
 

@@ -1,4 +1,3 @@
-
 """
 Режим «Диспетчер ДДС».
 
@@ -30,7 +29,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import bkt, config as C, db, domain as D
+from . import bkt, config as C, db, domain as D, facts, dds_rules, curriculum
 from .auth import current_user, role
 from . import session_store as store
 
@@ -56,12 +55,7 @@ def _find_sl(korotko: str) -> dict | None:
 # ================================================================ карточка от «оператора 112»
 
 def _postradavshie(sit: str) -> str:
-    s = sit.lower()
-    if re.search(r"пострадавших нет|без пострадавших|б/п|пострадавших людей нет", s):
-        return "net"
-    if re.search(r"пострадал|травм|кровотеч|без сознания|ожог|ранен|плохо|пострадавш|судорог|не дышит|задыха", s):
-        return "est"
-    return "neizvestno"
+    return facts.victims(sit) or "neizvestno"
 
 
 POST_RU = {"net": "нет", "est": "есть", "neizvestno": "нет данных"}
@@ -121,15 +115,15 @@ def _zapis(bil: dict, pravda: dict) -> list[dict]:
     return out
 
 
-def sobrat_kartochku(bil: dict, sluzhba: str | None, seed: int | None = None) -> dict:
+def sobrat_kartochku(bil: dict, sluzhba: str | None, seed: int | None = None, exercise_profile="standard") -> dict:
     rnd = random.Random(seed)
     gr = C.load("tree").get(bil["gruppa"], {})
     pravda = {"adres": bil["adres_etalon"], "telefon": bil["zayavitel"]["telefon"],
-              "fio": bil["zayavitel"]["fio"], "postradavshie": _postradavshie(bil["situaciya"]),
+              "fio": bil["zayavitel"]["fio"], "postradavshie": bil.get("victims") or _postradavshie(bil["situaciya"]),
               "opisanie": bil["situaciya"]}
     kart = dict(pravda)
     oshibka = None
-    if rnd.random() < C.DDS["veroyatnost_oshibki"]:
+    if exercise_profile == "card_check" and rnd.random() < 0.7:
         for pole in rnd.sample(C.DDS["oshibki"], len(C.DDS["oshibki"])):
             r = _isporti(pole, pravda, rnd)
             if r:
@@ -176,20 +170,14 @@ def _kontakty(sl: str) -> list[dict]:
 # ================================================================ собеседники
 
 def _peredano(tekst: str, pravda: dict) -> dict:
-    """Что из обязательного диспетчер передал бригаде (по всем своим репликам звонка)."""
-    adr = D.Q.compare_address(tekst, pravda["adres"], spoken=True)
-    op = D.tokens(pravda["opisanie"])
-    sut = len(op & D.tokens(tekst)) >= 2
-    tel_d = re.sub(r"\D", "", pravda["telefon"])
-    tel = bool(tel_d) and tel_d in re.sub(r"\D", "", tekst)
-    post = bool(re.search(r"пострадав|травм|без сознания|раненых|жертв", tekst.lower()))
-    return {"adres": adr["sovpalo"], "adres_dolya": adr["dolya"], "sut": sut,
-            "telefon": tel, "postradavshie": post}
+    return facts.transmission([{"tekst": tekst}], pravda)
 
 
 def _faza(s: dict) -> str:
+    if s.get("world_phase"):
+        return s["world_phase"]
     v = s.get("t_vyezd")
-    if not v:
+    if v is None:
         return "ne_vyehala"
     dt = _now() - v
     e = s.get("_rules", {}).get("dds", C.DDS)["etapy_sec"]
@@ -221,10 +209,13 @@ def _otvet_brigady(s: dict, call: dict, tekst: str) -> str:
     br = call["kontakt"]
     if s.get("brigada") and s["brigada"] != br["id"]:
         return "Мы на другом вызове. Работает бригада, которую вы уже направили."
+    messages = [{**m, "id": c["id"]+":"+str(i)} for c in s["zvonki"] if c["kontakt"]["id"] == br["id"]
+                for i,m in enumerate(c["dialog"]) if m["kto"] == "dispetcher"]
+    p = facts.transmission(messages, s["kartochka"]["_pravda"])
+    call["peredano"] = p
+    if not s.get("brigada") or s["brigada"] == br["id"]:
+        s["peredano"] = p
     if not s.get("t_vyezd"):
-        vse = " ".join(m["tekst"] for m in call["dialog"] if m["kto"] == "dispetcher")
-        p = _peredano(vse, s["kartochka"]["_pravda"])
-        call["peredano"] = p
         if p["adres"]:
             s["t_vyezd"] = _now()
             s["brigada"] = br["id"]
@@ -274,6 +265,15 @@ def _otvet(s: dict, call: dict, tekst: str) -> str:
                 f"пострадавшие — {POST_RU[pr['postradavshie']]}.")
         return "Старший оператор 112 слушает."
     if kto == "rukovoditel":
+        for code,flag,text in (("ne_kompetenciya","outside_competence","Карточка вне нашей компетенции. Передайте в соответствующую службу с пояснением."),
+                               ("duplicate","duplicate","Это повторная карточка по уже зарегистрированному происшествию."),
+                               ("otkaz","cancel_allowed","Реагирование отменено: необходимость работ не подтвердилась.")):
+            if s["bilet"].get(flag):
+                _osnovanie(s,code,"сообщение руководителя")
+                return text
+        if dds_rules.medical(s) and s["bilet"].get("no_dispatch"):
+            _osnovanie(s,"zaversheno","сообщение руководителя 103")
+            return "Обращение обработано без выезда бригады. Работы завершены, результат внесите в комментарий."
         return "Принял информацию. Держите в курсе."
     return "Слушаю."
 
@@ -284,14 +284,13 @@ class Start(BaseModel):
     scenario_id: str
     assignment_id: int | None = None
     sluzhba: str | None = None
+    exercise_profile: str = "standard"
+    lesson_id: str | None = None
 
 
 def _mine(sid: str, u: dict) -> dict:
-    s = LIVE.get(sid)
-    if not s:
-        raise HTTPException(404, "занятие не найдено или завершено")
-    if s["user_id"] != u["id"]:
-        raise HTTPException(403, "чужое занятие")
+    s = store.load(sid, u, "dds")
+    LIVE[sid] = s
     return s
 
 
@@ -317,17 +316,30 @@ def start(b: Start, u=Depends(role("trainee", "teacher"))):
     row = db.q1("SELECT * FROM scenarios WHERE id=?", (b.scenario_id,))
     if not row or (row["status"] != "published" and u["role"] == "trainee"):
         raise HTTPException(404, "сценарий недоступен")
-    bil = json.loads(row["data"])
+    bil = curriculum.enrich(json.loads(row["data"]))
     sl = b.sluzhba
     a = store.assignment(b.assignment_id, u, b.scenario_id, "dds")
     if a:
         if sl and a.get("dds_sluzhba") and sl != a["dds_sluzhba"]:
             raise HTTPException(403, "Служба не соответствует назначению")
         sl = sl or a.get("dds_sluzhba")
-    k = sobrat_kartochku(bil, sl)
+    if b.exercise_profile not in ("standard", "card_check"):
+        raise HTTPException(422, "Неизвестный профиль упражнения")
+    from . import lessons
+    if lessons.dispatch_item.get():bil=curriculum.enrich(lessons.dispatch_item.get()["data"])
+    policy = lessons.start_policy(u, b.lesson_id, b.scenario_id, "dds")
+    sl = policy.get("service") or sl
+    if sl and sl not in bil.get("service_profiles",[]) and not bil.get("outside_competence"):
+        raise HTTPException(422, "Сценарий не предназначен для выбранной службы")
+    k = sobrat_kartochku(bil, sl, exercise_profile=b.exercise_profile)
     sid = str(uuid.uuid4())
     s = {"id": sid, "kind": "dds", "user_id": u["id"], "scenario_id": b.scenario_id,
          "assignment_id": b.assignment_id, "bilet": bil, "nachalo": _now(),
+         "lesson_id": b.lesson_id, "lesson_policy": policy, "mode": policy.get("mode", "practice"),
+         "helper": {"allowed": policy.get("helper_allowed", True), "enabled":False, "exposed":False},
+         "exercise_profile": b.exercise_profile,
+         "source_kind":(lessons.dispatch_item.get() or {}).get("source","system"),
+         "source_session":(lessons.dispatch_item.get() or {}).get("source_session"),
          "kartochka": k, "zapis": _zapis(bil, k["_pravda"]),
          "kontakty": _kontakty(k["moya_sluzhba"]),
          "osnovaniya": {"postuplenie": {"t": _now(), "via": "карточка поступила"}},
@@ -340,8 +352,9 @@ def start(b: Start, u=Depends(role("trainee", "teacher"))):
           (sid, u["id"], b.scenario_id, "dds", b.assignment_id, s["nachalo"], "live",
            json.dumps(s, ensure_ascii=False, default=str)))
     store.event(s, "session_started", {"versions": s["versions"], "kind": "dds"})
-    return {"session_id": sid, "kartochka": _publichnaya(k), "zapis": s["zapis"],
-            "kontakty": s["kontakty"], "statusy": C.DDS["statusy"],
+    store.snapshot(s)
+    return {"session_id": sid, "started": s["nachalo"], "server_time": _now(), "exercise_profile": s["exercise_profile"], "kartochka": _publichnaya(k), "zapis": s["zapis"],
+            "kontakty": s["kontakty"], "statusy": [x for x in C.DDS["statusy"] if not dds_rules.medical(s) or x["kod"] not in ("ne_prinyata","otkaz")],
             "podtverzhdenie_sec": C.DDS["podtverzhdenie_sec"]}
 
 
@@ -358,13 +371,15 @@ def status(sid: str, b: Status, u=Depends(current_user)):
     st = next((x for x in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if x["kod"] == b.status), None)
     if not st:
         raise HTTPException(400, "нет такого статуса")
-    s["statusy"].append({"kod": st["kod"], "nazvanie": st["nazvanie"], "t": _now(),
+    if dds_rules.medical(s) and b.status in ("ne_prinyata", "otkaz"):
+        raise HTTPException(422, "Эти статусы неприменимы к службе 103")
+    s["statusy"].append({"id": uuid.uuid4().hex, "kod": st["kod"], "nazvanie": st["nazvanie"], "t": _now(),
                          "kommentariy": b.kommentariy.strip()})
     for x in s["kartochka"]["sluzhby"]:
         if x["moya"]:
             x["status"] = st["nazvanie"]
     _persist(s)
-    osn = s["osnovaniya"].get(st["osnovanie"])
+    osn = dds_rules.status_reason(s, st["kod"])
     return {"ok": True, "osnovanie_bylo": bool(osn),
             "preduprezhdenie": None if osn else
             "Основания для этого статуса ещё не было. Памятка требует ставить статус по факту."}
@@ -381,6 +396,8 @@ class Zamech(BaseModel):
 def zamechanie(sid: str, b: Zamech, u=Depends(current_user)):
     """Диспетчер отмечает ошибку оператора 112 в карточке (универсальный алгоритм, п. 3)."""
     s = _mine(sid, u)
+    if s.get("exercise_profile") != "card_check":
+        raise HTTPException(403, "Проверка чужого заполнения — отдельное упражнение")
     s["zamechaniya"].append({"pole": b.pole, "verno": b.verno.strip(),
                              "kommentariy": b.kommentariy, "t": _now()})
     _persist(s)
@@ -459,10 +476,10 @@ def events(sid: str, u=Depends(current_user)):
             if now - e["t"] > s.get("_rules", {}).get("dds", C.DDS)["vhodyashchiy_zvonok_zhdat_sec"]:
                 e["status"] = "propushchen"
             else:
-                out.append({"id": e["id"], "ot": e["kontakt"]["nazvanie"], "faza": e["faza"]})
+                out.append({"id": e["id"], "ot": e["kontakt"]["nazvanie"]})
     _persist(s)
-    return {"vhodyashchie": out, "faza": _faza(s), "t_sec": round(now - s["nachalo"], 1),
-            "propushcheno": sum(1 for e in s["sobytiya"] if e["status"] == "propushchen")}
+    return {"vhodyashchie": out, "faza": known_phase(s), "t_sec": round(now - s["nachalo"], 1),
+            "propushcheno": sum(1 for e in s["sobytiya"] if e["status"] == "propushchen"), "notices":s.get("visible_notices",[])}
 
 
 @router.post("/{sid}/incoming/{eid}/answer")
@@ -486,75 +503,11 @@ def answer(sid: str, eid: str, u=Depends(current_user)):
 # ================================================================ оценка
 
 def ocenit(s: dict) -> dict:
-    cfg_dds = s.get("_rules", {}).get("dds", C.DDS)
-    k = s["kartochka"]
-    t0 = s["nachalo"]
-    F: list[D.Fakt] = []
-    st = s["statusy"]
-    first = st[0] if st else None
-    prin = next((x for x in st if x["kod"] == "prinyata"), None)
-    tp = round(prin["t"] - t0, 1) if prin else None
-    F.append(D.Fakt("podtverzhdenie", f"Приём подтверждён за {cfg_dds['podtverzhdenie_sec']} с",
-                    bool(prin) and first["kod"] == "prinyata" and tp <= s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"], 3,
-                    "ПП РФ 1931, п. 9 подп. «р»: подтверждение ДДС — 30 с",
-                    {"fakt_sec": tp, "normativ_sec": s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"]}))
-
-    osh = k["_oshibka"]
-    zam = s["zamechaniya"]
-    if osh:
-        hit = next((z for z in zam if z["pole"] == osh["pole"]), None)
-        if osh["pole"] == "adres":
-            verno = bool(hit) and D.sravnit_adres(hit["verno"], osh["pravda"])["dolya"] >= 0.9
-        elif osh["pole"] == "telefon":
-            verno = bool(hit) and re.sub(r"\D", "", hit["verno"]) == re.sub(r"\D", "", osh["pravda"])
-        else:
-            verno = bool(hit) and hit["verno"] in (osh["pravda"], POST_RU.get(osh["pravda"]))
-        F.append(D.Fakt("proverka", "Ошибка оператора 112 найдена и исправлена", verno, 3,
-                        "Ответ заказчика п. 1.1: ДДС имеет доступ к записи разговора",
-                        {"pole": osh["pole"], "v_kartochke": osh["v_kartochke"],
-                         "pravda": osh["pravda"], "otmecheno": hit["verno"] if hit else None}))
-        lozh = [z for z in zam if z["pole"] != osh["pole"]]
-    else:
-        F.append(D.Fakt("proverka", "Карточка без ошибок — расхождений не заявлено", not zam, 3,
-                        "Ответ заказчика п. 1.1", {"otmecheno": [z["pole"] for z in zam]}))
-        lozh = zam
-    F.append(D.Fakt("lozhnye", "Нет ложных замечаний", not lozh, 1, "Универсальный алгоритм, п. 3",
-                    {"lozhnyh": len(lozh)}))
-
-    p = s.get("peredano") or {}
-    ok_p = bool(p) and p.get("adres") and p.get("sut") and (p.get("telefon") or p.get("postradavshie"))
-    F.append(D.Fakt("peredacha", "Бригаде переданы адрес, суть и сведения о пострадавших/заявителе",
-                    bool(ok_p), 3, "Памятка для ДДС: передача информации исполнителям",
-                    {"brigada_vyehala": bool(s.get("t_vyezd")), **p}))
-
-    osn = s["osnovaniya"]
-    bez = []
-    pozdno = []
-    for x in st:
-        cfg = next(c for c in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if c["kod"] == x["kod"])
-        o = osn.get(cfg["osnovanie"])
-        if not o or o["t"] > x["t"]:
-            bez.append(x["nazvanie"])
-        elif x["t"] - o["t"] > s.get("_rules", {}).get("dds", C.DDS)["svoevremenno_sec"] and x["kod"] != "prinyata":
-            pozdno.append(f"{x['nazvanie']}: {round(x['t'] - o['t'])} с")
-    F.append(D.Fakt("po_faktu", "Статусы только по факту получения информации", bool(st) and not bez, 3,
-                    s.get("_rules", {}).get("dds", C.DDS)["istochnik_statusov"], {"bez_osnovaniya": bez}))
-    F.append(D.Fakt("svoevremenno", f"Статус обновлён не позже {cfg_dds['svoevremenno_sec']} с после сведений",
-                    bool(st) and not pozdno, 2, "Учебный норматив, настраивается", {"pozdno": pozdno}))
-    zaversh = any(x["kod"] == "zaversheno" for x in st)
-    F.append(D.Fakt("zaversheno", "Реагирование доведено до «Работы завершены»", zaversh, 2,
-                    "Памятка для ДДС", {"poslednij": st[-1]["nazvanie"] if st else None}))
-    nuzhen = {c["kod"] for c in s.get("_rules", {}).get("dds", C.DDS)["statusy"] if c["kommentariy"]}
-    bez_k = [x["nazvanie"] for x in st if x["kod"] in nuzhen and not x["kommentariy"]]
-    F.append(D.Fakt("kommentarii", "Комментарии к статусам заполнены", bool(st) and not bez_k, 1,
-                    "Памятка для ДДС", {"bez_kommentariya": bez_k}))
-    nar = s["narusheniya_rechi"]
-    speech = any(m.get("kto") == "dispetcher" and m.get("tekst", "").strip()
-                 for call in s.get("zvonki", []) for m in call.get("dialog", []))
-    F.append(D.Fakt("rech", "Правила речи в переговорах", not nar if speech else None, 1, "Методика МЧС России",
-                    {"narusheniy": len(nar), "spisok": nar[:5]}))
-
-    return {**D.Q.result(F, "dds"), "t_podtverzhdeniya": tp}
+    if s.get("versions", {}).get("rubric") == "112-quality-1":
+        from .legacy_scoring import ocenit_dds
+        return ocenit_dds(s)
+    from .dds_rules import assess
+    return assess(s)
 
 
 @router.post("/{sid}/finish")
@@ -565,8 +518,8 @@ def finish(sid: str, u=Depends(current_user)):
     oc = ocenit(s)
     t = round(_now() - s["nachalo"], 1)
     v_norm = oc["t_podtverzhdeniya"] is not None and oc["t_podtverzhdeniya"] <= s.get("_rules", {}).get("dds", C.DDS)["podtverzhdenie_sec"]
-    itog = {"t_sec": t, "v_normativ": v_norm, "kind": "dds", **oc}
-    prof = bkt.primenit(u["id"], oc["fakty"], "dds") if u["role"] == "trainee" else {}
+    itog = {"t_sec": t, "v_normativ": v_norm, "kind": "dds", "assisted":bool(s.get("helper",{}).get("exposed")), "mode":s.get("mode","practice"), "parent_session":s.get("parent_session"), **oc}
+    prof = bkt.primenit(u["id"], oc["fakty"], "dds") if u["role"] == "trainee" and store.independent(s) and oc.get('rubric_version')==D.Q.RUBRIC_VERSION else {}
     db.ex("UPDATE sessions SET state='done',finished=?,data=?,ball=?,t_sec=?,v_norm=?,itog=? WHERE id=?",
           (_now(), json.dumps(s, ensure_ascii=False, default=str), oc["ball"], t,
            1 if v_norm else 0, json.dumps(itog, ensure_ascii=False), sid))
@@ -587,3 +540,7 @@ def live_rows() -> list[dict]:
                     "zvonkov": len(s["zvonki"]), "faza": _faza(s),
                     "zamechaniy": len(s["zamechaniya"]), "narusheniy": len(s["narusheniya_rechi"])})
     return out
+
+
+def known_phase(s):
+    return next((code for code in ("zaversheno","raboty","pribytie","vyezd") if code in s.get("osnovaniya",{})),"ne_vyehala")

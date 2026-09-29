@@ -51,7 +51,8 @@ def forecast_metrics(session_ids):
 def profile(uid,kind):
     if kind not in Q.PROGRAMS: raise ValueError("Unknown programme")
     all_rows=attempts(uid,kind)
-    rows=[r for r in all_rows if r["itog"].get("rubric_version")==Q.RUBRIC_VERSION]
+    from . import session_store as store
+    rows=[r for r in all_rows if r["itog"].get("rubric_version")==Q.RUBRIC_VERSION and store.independent(json.loads(r["data"]))]
     skills=[]
     for skill in Q.PROGRAMS[kind]:
         obs=[]
@@ -80,6 +81,8 @@ def profile(uid,kind):
             "criterion":"Проверить навык в трёх разных сценариях; это учебная цель, не автоматический допуск",
             "selection":"Правила по навыку и сложности; покрытие подтвердить преподавателю",
             "scenarios":[{"id":s["id"],"name":s.get("nazvanie",s["id"])} for s in pool[:3]]})
+    from . import curriculum
+    plan=curriculum.recommendations(uid,kind,skills)
     return {"kind":kind,"rubric_version":Q.RUBRIC_VERSION,"n":len(rows),
             "legacy_excluded":len(all_rows)-len(rows),"passed":sum(r["itog"].get("passed") is True for r in rows),
             "skills":skills,"plan":plan,"bkt":bkt.profil(uid,kind),
@@ -107,7 +110,7 @@ def review(sid,changes,reason,actor):
         for f in copy.deepcopy(prior["fakty"]):
             if f["kod"] in changes: f["proyden"]=changes[f["kod"]]
             facts.append(D.Fakt(**{k:f[k] for k in ("kod","nazvanie","proyden","ves","istochnik","detali")},t_ms=f.get("t_ms")))
-        result={**prior,**Q.result(facts,row["kind"])}
+        result={**prior,**Q.result(facts,row["kind"],critical=prior.get("critical_codes"),threshold=prior.get("pass_threshold",70))}
         evidence={f["kod"]:f for f in prior["fakty"]}
         for f in result["fakty"]:
             for key in ("evidence_event_ids","evaluated_at_event_id"):
@@ -118,9 +121,9 @@ def review(sid,changes,reason,actor):
               (sid,rev,actor["id"],reason.strip(),store.dumps(result),time.time()))
         # No reinterpretation of old mixed-programme BKT rows or old rubrics.
         for skill in Q.PROGRAMS[row["kind"]]:
-            db.ex("DELETE FROM bkt WHERE user_id=? AND skill=?",(row["user_id"],row["kind"]+":"+skill))
+            db.ex("DELETE FROM bkt WHERE user_id=? AND skill=?",(row["user_id"],bkt.skill_key(row["kind"],skill)))
         for past in attempts(row["user_id"],row["kind"]):
-            if past["itog"].get("rubric_version")==Q.RUBRIC_VERSION:
+            if past["itog"].get("rubric_version")==Q.RUBRIC_VERSION and store.independent(json.loads(past["data"])):
                 bkt.primenit(row["user_id"],past["itog"]["fakty"],row["kind"])
         db.audit(actor,"evidence_review",{"session":sid,"revision":rev,"changes":changes,"reason":reason})
         return result

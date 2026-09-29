@@ -1,4 +1,3 @@
-
 """
 Заявитель.
 
@@ -16,7 +15,7 @@ import re
 
 import httpx
 
-from . import config as C
+from . import config as C, facts
 
 SYSTEM = """Ты играешь роль ЗАЯВИТЕЛЯ, который звонит по номеру 112 в Москве.
 
@@ -67,7 +66,7 @@ def _bez_llm(bilet: dict, vopros: str, raskryt: bool) -> str:
     if re.search(r"(что случ|что произ|что у вас|слушаю)", v):
         return bilet["situaciya"]
     if re.search(r"(пострадав|раненые|люди|кто-нибудь)", v):
-        return "Не знаю точно, я отсюда не вижу."
+        return {"net":"Пострадавших нет.","est":"Есть пострадавшие.","neizvestno":"Точных сведений о пострадавших нет."}[bilet.get("victims") or facts.victims(bilet["situaciya"]) or "neizvestno"]
     return "Да, всё так. Приезжайте скорее."
 
 
@@ -76,12 +75,14 @@ async def otvet(bilet: dict, istoriya: list[dict], vopros: str,
     """Реплика заявителя. Раскрытие адреса — только при уточнении."""
     raskryt = bilet["trebuet_utochneniya"] and est_utochnenie(vopros)
 
+    if re.search(r"адрес|дом|улиц|корпус|телефон|номер для связи|представ|как вас зовут|фамили|пострадав", vopros, re.I):
+        return _bez_llm(bilet,vopros,raskryt)
     if not C.LLM_ON:
         return _bez_llm(bilet, vopros, raskryt)
 
     ut = ""
     if bilet["trebuet_utochneniya"]:
-        ut = UTOCH.format(adres_etalon=bilet["adres_etalon"])
+        ut = "Точный адрес пока не уточнён. Называй только приведённое описание места."
         if raskryt:
             ut += "\n   ОПЕРАТОР СЕЙЧАС СПРОСИЛ УТОЧНЕНИЕ — назови точный адрес."
 

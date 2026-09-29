@@ -1,40 +1,34 @@
-/* Template/logic smoke tests in a fake DOM. These are explicitly NOT browser E2E. */
-const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
-const root=path.resolve(__dirname,'..');
-function extract(file,name){
-  const text=fs.readFileSync(path.join(root,file),'utf8');
-  const starts=[...text.matchAll(/^(?:async )?function (\w+)\(/gm)];
-  const i=starts.findIndex(m=>m[1]===name);assert(i>=0,`Missing ${name}`);
-  return text.slice(starts[i].index,i+1<starts.length?starts[i+1].index:text.length);
+/* Real DOM + real isolated HTTP API. Does not certify browser layout, audio or GPU. */
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {JSDOM,VirtualConsole}=require('jsdom');
+const root=path.resolve(__dirname,'..'),base=process.env.TEST_BASE_URL||'http://127.0.0.1:18080';
+const errors=[];
+async function wait(fn,msg){const end=Date.now()+10000;while(Date.now()<end){if(fn())return;await new Promise(r=>setTimeout(r,30));}throw Error(msg);}
+async function main(){
+ const vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(String(e)));
+ const html=fs.readFileSync(path.join(root,'web/index.html'),'utf8').replace(/<script[^>]*src=[\s\S]*?<\/script>/g,'');
+ const dom=new JSDOM(html,{url:base,runScripts:'dangerously',pretendToBeVisual:true,virtualConsole:vc});const w=dom.window;
+ w.fetch=(url,opts)=>fetch(new URL(url,base),opts);w.AbortController=AbortController;w.confirm=()=>true;w.scrollTo=()=>{};w.HTMLElement.prototype.scrollIntoView=()=>{};
+ for(const file of ['network','dds','app','charts','insights','workspace','integration']){const tag=w.document.createElement('script');tag.textContent=fs.readFileSync(path.join(root,'web',file+'.js'),'utf8');w.document.body.append(tag);}
+ const $=s=>w.document.querySelector(s);
+ async function login(role){w.logout();await wait(()=>$('#lg'),'login form');$('#lg').value=role;$('#pw').value=role+'112';$('#go').click();await wait(()=>$('#nav [data-v]')&&w.eval('S.user?.role')===role,'login '+role);await new Promise(r=>setTimeout(r,100));}
+ console.log('UI login trainee');await login('trainee');await wait(()=>$('#queueStrip'),'queue');assert($('#myLessons'));
+ const start=await w.api('/api/session',{scenario_id:'b01_v1'}),sid=start.session_id;
+ console.log('UI resume',sid);await w.resumeAttempt(sid);assert($('#helperPanel'));assert.equal($('#helperEnabled').checked,false);assert($('#f_adres'));
+ $('#f_adres').value='Москва, улица Тестовая, дом 10';$('#f_adres').dispatchEvent(new w.Event('input',{bubbles:true}));await w.flushFields();
+ await w.resumeAttempt(sid);assert.equal($('#f_adres').value,'Москва, улица Тестовая, дом 10');
+ await w.api(`/api/helper/${sid}/toggle`,{enabled:true});await w.resumeAttempt(sid);assert($('#helperEnabled').checked);
+ await w.api(`/api/session/${sid}/otpravit`,{kartochka:w.eval('S.card')});
+ await w.api(`/api/training/${sid}/analyze`,{});await w.detailedRazbor(sid);assert($('#modalBox').textContent.includes('Разбор'));w.closeModal();
+ w.go('progress');await wait(()=>$('#attemptTable'),'profile charts');assert(w.document.querySelectorAll('.chart-card').length>=5);
+ console.log('UI login teacher');await login('teacher');w.go('group');await wait(()=>$('#chartHeat'),'group heatmap');
+ const f=$('[data-filter="kind"]');f.value='ops112';f.dispatchEvent(new w.Event('change'));await wait(()=>$('#attemptTable').textContent.includes('b01_v1'),'filter completed attempt');
+ const point=$('[data-attempt-ids]');assert(point);point.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));assert($('#attemptSelection').textContent.includes('Выбрано'));
+ w.go('quality');await wait(()=>$('#view').textContent.includes('V09'),'quality');
+ w.go('lessons');await wait(()=>$('#lessonForm'),'lesson form');assert($('#lessonSource').options.length===3);assert($('#lessonScenarios'));
+ w.go('materials');await wait(()=>$('#view').textContent.includes('Материал'),'materials');
+ w.go('scen');await wait(()=>$('#view').textContent.includes('Сценарии'),'scenario studio');
+ await login('admin');w.go('scopes');await wait(()=>$('#view').textContent.includes('Доступ'),'scopes');
+ assert.deepEqual(errors,[]);dom.window.close();console.log('PASS: login 3 roles, queue, 112 resume/manual field/helper, completed debrief, analytics filters/drilldown, lessons, sources, quality, materials, scenarios, scopes (JSDOM + HTTP; no visual/browser certification)');
 }
-function node(){return {innerHTML:'',textContent:'',value:'',querySelector:()=>node(),querySelectorAll:()=>[],scrollIntoView(){}};}
-const elements=new Map();
-const get=s=>{if(!elements.has(s))elements.set(s,node());return elements.get(s);};
-const ctx=vm.createContext({console,Date,Math,JSON,Number,String,Set,Map,
-  clearInterval(){},confirm:()=>true,document:{querySelectorAll:()=>[],getElementById:()=>node()},
-  $:get,esc:s=>String(s??'').replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])),
-  pct:n=>n==null?'—':Math.round(n*100)+'%',fmtT:()=>'',dl:s=>s,
-  modal:html=>get('#modalBox').innerHTML=html,closeModal(){},toast(message){throw new Error(message);},
-  S:{user:{role:'trainee'},cfg:{gruppy:{},dds:{podtverzhdenie_sec:30}},dialog:[]},
-  DS:{sid:'a',sluzhby:[]},POST_RU:{net:'нет'}});
-for(const name of ['factsHtml','detali'])vm.runInContext(extract('web/app.js',name),ctx);
-for(const name of ['viewDdsList','ddsFinish'])vm.runInContext(extract('web/dds.js',name),ctx);
-vm.runInContext(fs.readFileSync(path.join(root,'web/insights.js'),'utf8'),ctx);
-
-(async()=>{
-  const fact={kod:'rech',nazvanie:'<script>alert(1)</script>',proyden:null,ves:1,istochnik:'test',detali:{}};
-  const html=ctx.factsHtml([fact]);assert(html.includes('не проверено'));assert(!html.includes('<script>'));
-  ctx.api=async()=>[{id:'a',nazvanie:'A',situaciya:'Scenario',adres_vidimy:'Address',slozhnost:1}];
-  await ctx.viewDdsList(node());assert(get('#ddsBody').innerHTML.includes('Указан в карточке'));
-  ctx.api=async()=>({ball:74,passed:false,verdikt:'не зачтено',fakty:[fact],session_id:'a',t_podtverzhdeniya:1});
-  await ctx.ddsFinish();assert(get('#view').innerHTML.includes('не зачтено'));
-  assert(get('#view').innerHTML.includes('</div></div>'));assert(!get('#view').innerHTML.includes('}/div>'));
-  const target=node();
-  ctx.api=async()=>({n:0,passed:0,legacy_excluded:0,bkt_note:'baseline',skills:[{name:'Адрес',n:0}],plan:[],
-    forecasts:{n:0,brier:null,accuracy:null,calibration:[],warning:'small sample'},attempts:[]});
-  await ctx.viewInsights(target);assert(target.innerHTML.includes('не проверен'));assert(!target.textContent.startsWith('Ошибка'));
-  ctx.api=async()=>({session:{scenario_id:'a',started:1},itog:{ball:0,verdikt:'не зачтено',fakty:[fact]},
-    events:[{seq:1,event_id:'a',ts:2,type:'dialog',payload:{text:'<img src=x onerror=alert(1)>'}}],dialog:[]});
-  await ctx.detailedRazbor('a');assert(!get('#modalBox').innerHTML.includes('<img src=x'));
-  console.log('Frontend smoke: 5 scenarios passed (fake DOM, no audio/browser)');
-})().catch(e=>{console.error(e);process.exitCode=1;});
+main().then(()=>process.exit(0)).catch(e=>{console.error(e,errors);process.exit(1)});

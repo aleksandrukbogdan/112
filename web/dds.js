@@ -39,19 +39,14 @@ async function viewDdsList(v) {
 
 async function ddsStart(scId, aid, sl) {
   try {
-    const r = await api("/api/dds/session", { scenario_id: scId, assignment_id: aid || null,
-      sluzhba: sl || ($("#ddsSl") ? $("#ddsSl").value || null : null) });
-    Object.assign(DS, { sid: r.session_id, k: r.kartochka, zapis: r.zapis, kont: r.kontakty,
-      statusy: r.statusy, st: [], call: null, t0: Date.now(), prinyata: false, zam: [] });
-    ddsView();
-    clearInterval(DS.tim); DS.tim = setInterval(ddsTick, 250);
-    clearInterval(DS.poll); DS.poll = setInterval(ddsPoll, 1000);
-  } catch (e) { toast(e.message, "bad"); }
+    const r=await api("/api/dds/session",{scenario_id:scId,assignment_id:aid||null,sluzhba:sl||($("#ddsSl")?.value||null)});
+    await refreshQueue(false);await resumeAttempt(r.session_id);
+  }catch(e){toast(e.message,"bad");}
 }
 
 function ddsTick() {
   const b = $("#ddsClock"); if (!b) return;
-  const t = (Date.now() - DS.t0) / 1000, lim = S.cfg.dds.podtverzhdenie_sec;
+  const t = (Date.now() - DS.t0) / 1000, lim = DS.limit || S.cfg.dds.podtverzhdenie_sec;
   if (DS.prinyata) { b.className = "arm-box arm-clock ok"; return; }
   b.className = "arm-box arm-clock" + (t > lim ? " over" : "");
   b.innerHTML = `<div class="v">${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}</div>
@@ -76,7 +71,8 @@ async function ddsPoll() {
     if ($("#ddsFaza")) $("#ddsFaza").textContent = { ne_vyehala: "бригада не направлена", vyezd: "бригада в пути",
       pribytie: "бригада на месте", raboty: "идут работы", zaversheno: "работы завершены" }[e.faza] +
       (e.propushcheno ? ` · пропущено входящих: ${e.propushcheno}` : "");
-  } catch {}
+    if(e.notices)appendNotices(e.notices);
+  } catch(err) { if($("#ddsFaza"))$("#ddsFaza").textContent="Нет связи: "+err.message; }
 }
 
 function ddsView() {
@@ -243,26 +239,18 @@ async function ddsHang() {
 }
 
 async function ddsFinish() {
-  if (!confirm("Закрыть карточку и получить разбор?")) return;
-  clearInterval(DS.tim); clearInterval(DS.poll); document.querySelectorAll(".ring").forEach(x => x.remove());
-  const r = await api(`/api/dds/${DS.sid}/finish`, {});
-  DS.sid = null;
-  const c = r.passed ? "var(--ok)" : r.ball >= 50 ? "var(--warn)" : "var(--bad)";
-  const o = r.oshibka_bylo;
-  $("#view").innerHTML = `<div class="grid g2"><div>
-    <div class="kpis" style="margin-bottom:10px">
-      <div class="kpi"><div class="v" style="color:${c}">${r.ball}</div><div class="l">Балл · ${r.verdikt}</div></div>
-      <div class="kpi"><div class="v">${r.t_podtverzhdeniya ?? "—"}<span style="font-size:14px"> с</span></div><div class="l">Подтверждение приёма</div><div class="n">норматив ${S.cfg.dds.podtverzhdenie_sec} с</div></div>
-    </div>
-    <div class="card"><h2>Граф доказательств · диспетчер ДДС</h2>${factsHtml(r.fakty)}</div></div>
-    <div><div class="card" style="margin-bottom:10px"><h2>Ошибка оператора 112 в карточке</h2>
-      ${o ? `<div class="fact"><div class="fact-n">Поле «${esc(o.pole)}»</div><div class="fact-d">в карточке: ${esc(POST_RU[o.v_kartochke] || o.v_kartochke)}\nпо записи: ${esc(POST_RU[o.pravda] || o.pravda)}</div></div>`
-        : `<div class="muted">В этой карточке ошибок не было.</div>`}</div>
-      <div class="card"><div class="row"><button class="btn" onclick="go('dds')">К списку происшествий</button>
-      <button class="btn btn-g" onclick="openRazbor('${r.session_id}')">История действий</button><a class="btn btn-g" href="${dl(`/api/otchet/zanyatie/${r.session_id}.pdf`)}">Отчёт PDF</a></div></div></div></div>`;
+  const sid=DS.sid;if(!sid)return;
+  if(!confirm("Завершить обработку карточки и получить оценку?"))return;
+  try{
+    await Transport.flush();
+    await api(`/api/dds/${sid}/finish`,{});
+    clearInterval(S.timer);clearInterval(DS.tim);clearInterval(DS.poll);
+    await api(`/api/training/${sid}/analyze`,{}).catch(e=>toast("Анализ текста: "+e.message,"bad"));
+    clearInterval(DS.tim);clearInterval(DS.poll);document.querySelectorAll(".ring").forEach(x=>x.remove());
+    DS.sid=null;DS.call=null;Workspace.mode=null;go("queue");await detailedRazbor(sid);
+  }catch(e){toast(e.message,"bad");}
 }
 
-/* общий микрофон для телефона ДДС */
 async function micTo(cb, btn) {
   if (S.rec) { S.rec.stop(); return; }
   try {

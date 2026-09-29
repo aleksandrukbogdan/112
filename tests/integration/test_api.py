@@ -33,6 +33,7 @@ class APITests(unittest.TestCase):
         for uid,role in [(1,"trainee"),(2,"trainee"),(3,"teacher"),(4,"admin")]:
             db.ex("INSERT INTO users(id,login,name,role,pw_hash,group_id) VALUES(?,?,?,?,?,?)",
                   (uid,"test"+str(uid),"Test user",role,"not-a-real-password",1))
+        db.ex("INSERT INTO teacher_groups(teacher_id,group_id) VALUES(3,1)")
         cls.bg=patch.object(db,"start_backup_thread");cls.bg.start()
         cls.client=TestClient(main.app);cls.client.__enter__()
         cls.sc=copy.deepcopy(C.load("bilety")[0]);cls.sc["id"]="patch-test-scenario"

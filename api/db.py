@@ -1,4 +1,3 @@
-
 """
 Хранилище.
 
@@ -14,12 +13,14 @@ pg_dump, версия которого обязана совпадать с ве
 from __future__ import annotations
 
 import gzip
+import logging
 import json
 import os
 import re
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,10 +30,15 @@ DB_PATH = Path(os.environ.get("DB_PATH", "/app/state/t112.db"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/app/state/backup"))
 _lock = threading.RLock()
 _transaction = threading.local()
+_backup_thread = None
+_backup_thread_lock = threading.Lock()
+_log = logging.getLogger(__name__)
 
 TABLES = ["groups", "users", "scenarios", "assignments", "sessions", "forecasts",
           "bkt", "audit", "settings", "schema_migrations", "content_versions", "session_events",
-          "completion_receipts", "evidence_reviews"]
+          "completion_receipts", "evidence_reviews", "teacher_groups", "lessons", "lesson_members",
+          "command_receipts", "session_snapshots", "helper_proposals", "materials",
+          "scenario_revisions", "analytics_snapshots"]
 WITH_ID = {"groups", "users", "scenarios", "assignments", "sessions", "forecasts", "audit"}
 
 
@@ -78,6 +84,10 @@ _conn = None
 
 
 def conn():
+    with _lock:
+        return _connect()
+
+def _connect():
     global _conn
     if _conn is None:
         if PG:
@@ -94,6 +104,7 @@ def conn():
             if _conn is None:
                 raise RuntimeError(f"PostgreSQL недоступен: {last}")
             with _conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(112202609)")
                 for st in _schema(True).split(";"):
                     if st.strip():
                         cur.execute(st)
@@ -112,6 +123,7 @@ def conn():
 def migrate(c):
     """Additive migration: existing attempts and aggregate BKT rows are retained."""
     from .migrations import MIGRATIONS
+    if PG:c.execute("SELECT pg_advisory_xact_lock(112202609)")
     c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied DOUBLE PRECISION)")
     try:
         for version, statements in MIGRATIONS:
@@ -163,7 +175,8 @@ def ex(sql: str, args=()):
             if PG and m and m.group(1) in WITH_ID and "RETURNING" not in sql.upper():
                 s += " RETURNING id"
                 cur = c.execute(s, tuple(args))
-                rid = cur.fetchone()["id"]
+                returned = cur.fetchone()
+                rid = returned["id"] if returned else None
             else:
                 cur = c.execute(s, tuple(args))
                 rid = getattr(cur, "lastrowid", None)
@@ -239,9 +252,14 @@ def backup_now(keep: int = 14) -> str:
             txc.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         dump = {"format": "t112-backup-2", "created": time.time(), "backend": backend(),
                 "tables": {t: q(f"SELECT * FROM {t}") for t in TABLES}}
-    name = BACKUP_DIR / f"t112-{time.strftime('%Y%m%d-%H%M%S')}.json.gz"
-    with gzip.open(name, "wt", encoding="utf-8") as f:
-        json.dump(dump, f, ensure_ascii=False, default=str)
+    name = BACKUP_DIR / f"t112-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.json.gz"
+    temporary = name.with_suffix('.json.gz.tmp')
+    try:
+        with gzip.open(temporary, "wt", encoding="utf-8") as f:
+            json.dump(dump, f, ensure_ascii=False, default=str)
+        os.replace(temporary, name)
+    finally:
+        temporary.unlink(missing_ok=True)
     for old in sorted(BACKUP_DIR.glob("t112-*.json.gz"))[:-keep]:
         old.unlink(missing_ok=True)
     return str(name)
@@ -276,11 +294,62 @@ def list_backups() -> list[dict]:
 
 
 def start_backup_thread(period_sec: int = 86400) -> None:
+    """One scheduler per process; a cross-process lock elects the backup writer."""
+    global _backup_thread
+    if period_sec <= 0:
+        raise ValueError('BACKUP_PERIOD_SEC must be positive')
     def loop():
         while True:
             time.sleep(period_sec)
             try:
-                backup_now()
-            except Exception:
-                pass
-    threading.Thread(target=loop, daemon=True).start()
+                BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                if PG:
+                    import psycopg
+                    with psycopg.connect(DATABASE_URL, autocommit=True) as leader:
+                        if not leader.execute('SELECT pg_try_advisory_lock(112202611)').fetchone()[0]:
+                            continue
+                        try:
+                            _scheduled_backup()
+                        finally:
+                            leader.execute('SELECT pg_advisory_unlock(112202611)')
+                else:
+                    import fcntl
+                    with (BACKUP_DIR / '.scheduler.lock').open('a+') as lock:
+                        try:fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:continue
+                        _scheduled_backup()
+            except Exception as exc:
+                _log.exception('Scheduled backup failed')
+                _backup_status('error',str(exc))
+    with _backup_thread_lock:
+        if _backup_thread is not None and _backup_thread.is_alive():return
+        _backup_thread = threading.Thread(target=loop, name='t112-backup', daemon=True)
+        _backup_thread.start()
+
+
+def _backup_status(state: str, detail: str) -> None:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    status = BACKUP_DIR / 'scheduler-status.json'
+    temporary = status.with_name(status.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        temporary.write_text(json.dumps({'state':state,'at':time.time(),'detail':detail},ensure_ascii=False),encoding='utf-8')
+        os.replace(temporary,status)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _scheduled_backup() -> None:
+    # Other workers may wake together; a successful daily copy is sufficient.
+    latest = sorted(BACKUP_DIR.glob('t112-*.json.gz'), key=lambda p:p.stat().st_mtime, reverse=True)
+    if latest and time.time()-latest[0].stat().st_mtime < 20 * 3600:return
+    _backup_status('running','')
+    name = backup_now()
+    _backup_status('ok',Path(name).name)
+
+
+def lock_row(table, key, value):
+    if table not in ("sessions", "lessons", "users", "groups") or key not in ("id",):
+        raise ValueError("Unsupported row lock")
+    if not getattr(_transaction, "depth", 0):
+        raise RuntimeError("Row locks require a transaction")
+    return q1(f"SELECT * FROM {table} WHERE {key}=?" + (" FOR UPDATE" if PG else ""), (value,))

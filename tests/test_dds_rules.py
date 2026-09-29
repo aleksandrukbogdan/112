@@ -12,7 +12,7 @@ from api import config as C, domain as D
 tree=ast.parse((Path(__file__).resolve().parents[1]/"api/dds.py").read_text())
 function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="ocenit")
 function.decorator_list=[]
-scope={"D":D,"C":C,"re":re,"POST_RU":{"net":"нет","est":"есть","ne_na_meste":"не на месте"}}
+scope={"__name__":"api.dds","__package__":"api","D":D,"C":C,"re":re,"POST_RU":{"net":"нет","est":"есть","ne_na_meste":"не на месте"}}
 exec(compile(ast.Module(body=[function],type_ignores=[]),"dds-scoring-extraction","exec"),scope)
 
 class DDSRulesTests(unittest.TestCase):

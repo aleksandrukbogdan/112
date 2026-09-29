@@ -16,18 +16,9 @@ const pct = v => v == null ? "—" : Math.round(v * 100) + "%";
 const col = v => v >= .8 ? "var(--ok)" : v >= .5 ? "var(--warn)" : "var(--bad)";
 
 async function api(path, body, method) {
-  const opt = { headers: { Authorization: "Bearer " + (S.token || "") } };
-  if (body !== undefined) {
-    opt.method = method || "POST";
-    opt.headers["Content-Type"] = "application/json";
-    opt.body = JSON.stringify(body);
-  } else if (method) opt.method = method;
-  const r = await fetch(path, opt);
-  if (r.status === 401 && S.user) { logout(); throw new Error("сессия истекла"); }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.detail || ("ошибка " + r.status));
-  return j;
+  return Transport.request(path,body,method);
 }
+
 const dl = p => `${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(S.token)}`;
 
 function toast(msg, kind = "") {
@@ -71,7 +62,7 @@ function viewLogin(err) {
 
 function logout() {
   localStorage.removeItem("t112_token"); S.token = null; S.user = null;
-  clearInterval(S.timer); clearInterval(S.liveTimer); viewLogin();
+  clearInterval(S.timer); clearInterval(S.liveTimer);clearInterval(DS.tim);clearInterval(DS.poll);clearInterval(Workspace.queueTimer); S.sid=null;DS.sid=null;Workspace.mode=null;viewLogin();
 }
 
 /* ================================================== каркас */
@@ -90,8 +81,7 @@ async function boot() {
   try {
     S.user = await api("/api/me");
     S.cfg = await api("/api/config");
-    const h = await fetch("/health").then(r => r.json());
-    S.voice = !!h.voice?.asr; S.tts = !!h.voice?.tts; S.engine = h.voice?.engine;
+    refreshVoiceHealth();
   } catch { return viewLogin(); }
   $("#hdr").style.display = "";
   const c = S.cfg.svodka;
@@ -107,6 +97,8 @@ async function boot() {
   document.querySelectorAll("#nav button").forEach(b => b.onclick = () => go(b.dataset.v));
   document.addEventListener("keydown", hotkeys);
   go(tabs[0][0]);
+  clearInterval(Workspace.queueTimer);Workspace.queueTimer=setInterval(()=>refreshQueue(false),2000);
+  refreshQueue(false);
 }
 
 function go(v) {
@@ -205,15 +197,15 @@ async function startFrom(scId, aid) {
     S.dialog = [{ kto: "sys", tekst: r.privetstvie }];
     S.card = {}; S.svc = []; S.prognoz = null; S.grp = S.p1 = S.p2 = null;
     if (!S.treeTop) S.treeTop = await api("/api/tree");
-    viewCall();
-    clearInterval(S.timer); S.timer = setInterval(tick, 250);
+    await resumeAttempt(r.session_id);
+    await refreshQueue(true);
     setTimeout(() => { if (S.sid) askPrognoz(true); }, 30000);
   } catch (e) { toast(e.message, "bad"); }
 }
 
 function tick() {
   const box = $("#timer"); if (!box) return;
-  const t = (Date.now() - S.t0) / 1000, n = S.cfg.normativy.kartochka_sec;
+  const t = (Date.now() - S.t0) / 1000, n = S.normativ || S.cfg.normativy.kartochka_sec;
   const over = t > n;
   const mm = String(Math.floor(t / 60)).padStart(2, "0");
   const ss = String(Math.floor(t % 60)).padStart(2, "0");
@@ -297,7 +289,8 @@ function viewCall() {
   v.querySelectorAll("[data-part]").forEach(el => el.oninput = () => {
     S.addr[el.dataset.part] = el.value;
     const order = ["okrug", "raion", "ulica", "dom", "korpus", "kvartira", "podezd", "etazh"];
-    const bits = ["Москва", ...order.map(k => (S.addr[k] || "").trim()).filter(Boolean)];
+    const prefixes={dom:"дом ",korpus:"корпус ",kvartira:"квартира ",podezd:"подъезд ",etazh:"этаж "};
+    const bits = ["Москва", ...order.filter(k=>(S.addr[k]||"").trim()).map(k=>(prefixes[k]||"")+(S.addr[k]||"").trim())];
     const s = bits.join(", ");
     $("#f_adres").value = s;
     setField("adres_polny", s);
@@ -470,7 +463,8 @@ function hotkeys(e) {
 const _deb = {};
 function setField(k, v) {
   S.card[k] = v; clearTimeout(_deb[k]);
-  _deb[k] = setTimeout(() => api(`/api/session/${S.sid}/pole`, { key: k, value: v }).catch(() => {}), 400);
+  const sid=S.sid;
+  _deb[k] = setTimeout(() => { _deb[k]=null; api(`/api/session/${sid}/pole`, { key: k, value: v }).catch(e => toast(e.message,"bad")); }, 400);
   updReady();
 }
 function updReady() {
@@ -514,18 +508,22 @@ function drawSide() {
 }
 
 async function abandon() {
-  if (!confirm("Прервать вызов? Результат не сохранится.")) return;
-  clearInterval(S.timer); S.sid = null; go(TABS[S.user.role][0][0]);
+  if (!confirm("Прервать вызов? Действия сохранятся как незавершённая попытка, без оценки.")) return;
+  await flushFields();
+  if(S.sid)await api(`/api/training/${S.sid}/stop`,{});
+  clearInterval(S.timer); S.sid = null; go("queue");
 }
 
 async function finish() {
-  clearInterval(S.timer);
-  Object.values(_deb).forEach(clearTimeout);
+  const sid=S.sid;if(!sid)return;
+  const button=$("#send");if(button)button.disabled=true;
   try {
-    const r = await api(`/api/session/${S.sid}/otpravit`, { sluzhby: S.svc, kartochka: S.card });
-    const sid = S.sid; S.sid = null;
-    showRazbor(sid, r);
-  } catch (e) { toast(e.message, "bad"); }
+    await flushFields();
+    const r=await api(`/api/session/${sid}/otpravit`,{sluzhby:S.svc,kartochka:S.card});
+    clearInterval(S.timer);clearInterval(DS.tim);clearInterval(DS.poll);
+    await api(`/api/training/${sid}/analyze`,{}).catch(e=>toast("Анализ текста: "+e.message,"bad"));
+    clearInterval(S.timer);S.sid=null;Workspace.mode=null;go("queue");await detailedRazbor(sid);
+  } catch(e){toast(e.message,"bad");if(button)button.disabled=false;}
 }
 
 function factsHtml(fakty) {
@@ -626,7 +624,7 @@ function dinamHtml(d) {
     <line x1="30" y1="120" x2="390" y2="120" stroke="var(--br)"/><line x1="30" y1="10" x2="30" y2="120" stroke="var(--br)"/>
     <line x1="30" y1="${y(70)}" x2="390" y2="${y(70)}" stroke="var(--ok)" stroke-dasharray="3 4" opacity=".5"/>
     <text x="4" y="16" fill="var(--dim2)" font-size="9">100</text><text x="10" y="123" fill="var(--dim2)" font-size="9">0</text>
-    <text x="360" y="${y(70) - 3}" fill="var(--ok)" font-size="8" opacity=".7">зачёт</text>
+    <text x="360" y="${y(70) - 3}" fill="var(--ok)" font-size="8" opacity=".7">порог балла</text>
     ${d.length > 1 ? `<polyline fill="none" stroke="var(--ac)" stroke-width="2" points="${d.map((p, i) => `${x(i)},${y(p.ball)}`).join(" ")}"/>` : ""}
     ${d.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.ball)}" r="3.5" fill="var(--ac)"/>`).join("")}</svg>
     <div class="hint">Ось Y от нуля. Точек: ${d.length}.${d.length < 5 ? " Для тренда данных недостаточно." : ""}</div>`;
@@ -911,7 +909,7 @@ async function viewSystem(v) {
     ${s.llm.note ? `<tr><td colspan="2" class="muted">${esc(s.llm.note)}</td></tr>` : ""}
     <tr><td>Распознавание: GigaAM v3 (GPU)${s.voice.gigaam?.gpu ? " · " + esc(s.voice.gigaam.gpu) : ""}</td><td>${ok(!!s.voice.gigaam?.ok)}</td></tr>
     <tr><td>Распознавание: Vosk (CPU, запасной)</td><td>${ok(!!s.voice.vosk)}</td></tr>
-    <tr><td>Синтез речи: F5-TTS</td><td>${ok(!!s.voice.tts)}</td></tr>
+    <tr><td>Синтез речи: ${esc(s.voice.tts_engine || "движок не указан")}</td><td>${ok(!!s.voice.tts)}</td></tr>
     <tr><td>Сейчас распознаёт</td><td><b>${s.voice.engine === "gigaam" ? "GigaAM" : s.voice.engine === "vosk" ? "Vosk" : "—"}</b></td></tr>
     ${s.voice.note ? `<tr><td colspan="2" class="muted">${esc(s.voice.note)}</td></tr>` : ""}
     <tr><td>Резервных копий</td><td>${s.backups}</td></tr></table></div>
@@ -1184,4 +1182,3 @@ const VIEWS = {
   system: viewSystem, users: viewUsers, audit: viewAudit, backup: viewBackup, settings: viewSettings, voices: viewVoices,
 };
 
-boot();

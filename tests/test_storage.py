@@ -23,7 +23,7 @@ class StorageTests(DatabaseCase):
     def test_migration_repeat_preserves_data(self):
         self.state()
         db.migrate(db.conn()); db.migrate(db.conn())
-        self.assertEqual(len(db.q("SELECT * FROM schema_migrations")),1)
+        self.assertEqual(len(db.q("SELECT * FROM schema_migrations")),len(__import__("api.migrations",fromlist=["MIGRATIONS"]).MIGRATIONS))
         self.assertEqual(db.q1("SELECT state FROM sessions WHERE id='s'")["state"],"live")
 
     def test_events_and_frozen_rules(self):
@@ -78,7 +78,13 @@ class StorageTests(DatabaseCase):
         db.ex("DELETE FROM session_events")
         db.restore(path)
         self.assertEqual(len(db.q("SELECT * FROM session_events")),1)
-        self.assertEqual(len(db.q("SELECT * FROM schema_migrations")),1)
+        self.assertEqual(len(db.q("SELECT * FROM schema_migrations")),len(__import__("api.migrations",fromlist=["MIGRATIONS"]).MIGRATIONS))
+
+    def test_backup_names_are_unique_and_complete(self):
+        first,second=db.backup_now(),db.backup_now()
+        self.assertNotEqual(first,second)
+        self.assertTrue(Path(first).is_file() and Path(second).is_file())
+        self.assertEqual(list(Path(first).parent.glob('*.tmp')),[])
 
 
 if __name__=="__main__": unittest.main()
